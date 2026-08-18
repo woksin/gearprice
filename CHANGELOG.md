@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A run could hang indefinitely when several models fit a query. The prompt asking which
+  one was meant was drawn underneath a spinner that rewrote the same line several times a
+  second, so the question was wiped before it could be read and the command sat waiting on
+  input nobody knew it wanted. The spinner now stops before the question, and an
+  unanswered prompt takes the default after a minute rather than waiting forever.
+
 ### Added
 
 - `gearprice guide` — a short walkthrough of what to type and what the numbers mean, for
