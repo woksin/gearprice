@@ -205,23 +205,41 @@ pub fn print_price(report: &PriceReport, style: Style) {
 
     if !report.market.grades.is_empty() {
         println!();
-        println!("{}", style.bold("Condition mix"));
-        let widest = report
-            .market
-            .grades
-            .iter()
-            .map(|grade| grade.listings)
-            .max()
-            .unwrap_or(1)
-            .max(1);
+        println!(
+            "{}",
+            style.bold("Asking price by condition  (median, best grade first)")
+        );
         for grade in &report.market.grades {
+            let against = match grade.against_median {
+                Some(difference) if difference.abs() >= 1.0 => {
+                    let sign = if difference < 0.0 { "−" } else { "+" };
+                    style.dim(&format!(
+                        "{sign}{} against the median",
+                        price(difference.abs(), currency)
+                    ))
+                }
+                _ => String::new(),
+            };
             println!(
-                "  {:<18} {:>6}  {}",
+                "  {:<21} {:>5} listings {:>12}  {against}",
                 grade.grade,
                 number(grade.listings),
-                bar(grade.listings, widest, 28)
+                price(grade.median, currency),
             );
         }
+    }
+
+    if let Some(share) = report.market.sellers_taking_offers {
+        println!();
+        println!(
+            "  {} of these sellers accept offers{}",
+            percent(share),
+            if share >= 0.5 {
+                " — treat the asking prices above as a starting point"
+            } else {
+                ""
+            }
+        );
     }
 
     if !report.listings.is_empty() {
@@ -234,11 +252,23 @@ pub fn print_price(report: &PriceReport, style: Style) {
 }
 
 fn print_bands(bands: &BandTable, currency: &str, style: Style) {
+    let timed = bands.bands.iter().any(|row| row.days_listed.is_some());
     println!(
         "{}",
-        style.bold("Price bands  (what sellers are asking for this model right now)")
+        style.bold(if timed {
+            "Price bands  (what sellers are asking, and whether anyone is paying it)"
+        } else {
+            "Price bands  (what sellers are asking for this model right now)"
+        })
     );
-    println!("  {:<9} {:>25} {:>7}  Meaning", "Band", "Range", "Share");
+    if timed {
+        println!(
+            "  {:<9} {:>25} {:>7} {:>13}  Meaning",
+            "Band", "Range", "Share", "Listed for"
+        );
+    } else {
+        println!("  {:<9} {:>25} {:>7}  Meaning", "Band", "Range", "Share");
+    }
     println!("  {}", style.dim(&"─".repeat(RULE_WIDTH - 2)));
     let coarse = coarse_column(bands.bands.iter().flat_map(|row| [row.from, row.to]));
     for row in &bands.bands {
@@ -247,13 +277,47 @@ fn print_bands(bands: &BandTable, currency: &str, style: Style) {
             .into_iter()
             .find(|band| band.name() == row.band)
             .unwrap_or(Band::Fair);
+        if timed {
+            println!(
+                "  {:<9} {:>25} {:>7} {:>13}  {}",
+                style.band(band, &row.band),
+                range,
+                format!("{:.0}%", row.share * 100.0),
+                row.days_listed.map(days).unwrap_or_else(|| "—".into()),
+                style.dim(&row.verdict)
+            );
+        } else {
+            println!(
+                "  {:<9} {:>25} {:>7}  {}",
+                style.band(band, &row.band),
+                range,
+                format!("{:.0}%", row.share * 100.0),
+                style.dim(&row.verdict)
+            );
+        }
+    }
+    if timed {
         println!(
-            "  {:<9} {:>25} {:>7}  {}",
-            style.band(band, &row.band),
-            range,
-            format!("{:.0}%", row.share * 100.0),
-            style.dim(&row.verdict)
+            "  {}",
+            style.dim(
+                "Listed for = median days these have been up. Cheap listings leave because \
+                 they sell;"
+            )
         );
+        println!(
+            "  {}",
+            style.dim("dear ones pile up, so a long wait is a price the market is not paying.")
+        );
+    }
+}
+
+/// `12 days`, `4 months`, `2.7 years` — the unit a reader thinks in at that scale.
+fn days(count: i64) -> String {
+    match count {
+        ..=1 => format!("{count} day"),
+        2..=89 => format!("{count} days"),
+        90..=545 => format!("{} months", (count as f64 / 30.44).round() as i64),
+        _ => format!("{:.1} years", count as f64 / 365.25),
     }
 }
 
@@ -732,6 +796,10 @@ fn price_range(from: Option<f64>, to: Option<f64>, currency: &str, coarse: bool)
     }
 }
 
+fn percent(share: f64) -> String {
+    format!("{:.0}%", share * 100.0)
+}
+
 pub fn number(value: u32) -> String {
     money::group_thousands(f64::from(value), 0)
 }
@@ -867,6 +935,19 @@ mod tests {
             price_range(Some(1_495.0), Some(3_800.0), "NOK", true)
         );
         assert_eq!("—", price_range(None, None, "USD", true));
+    }
+
+    #[test]
+    fn a_span_of_days_is_told_in_the_unit_a_reader_thinks_in() {
+        assert_eq!("0 day", days(0));
+        assert_eq!("1 day", days(1));
+        assert_eq!("28 days", days(28));
+        assert_eq!("89 days", days(89));
+        assert_eq!("3 months", days(90));
+        assert_eq!("8 months", days(234));
+        assert_eq!("1.6 years", days(600));
+        // The five-and-a-half-year Stratocaster listings that started all this.
+        assert_eq!("5.4 years", days(1_985));
     }
 
     #[test]

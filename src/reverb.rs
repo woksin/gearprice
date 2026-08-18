@@ -18,6 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::cache::ResponseCache;
@@ -389,6 +390,14 @@ pub struct Listing {
     pub price: Price,
     #[serde(default)]
     pub auction: bool,
+    /// When the listing went up. The age of a live listing is the closest thing left to
+    /// evidence about whether its price clears — see [`crate::market`].
+    #[serde(default)]
+    pub published_at: Option<String>,
+    /// Whether the seller accepts offers, which makes the asking price a starting point
+    /// rather than a price.
+    #[serde(default)]
+    pub offers_enabled: bool,
     #[serde(rename = "_links", default)]
     pub links: ListingLinks,
 }
@@ -409,6 +418,19 @@ impl Listing {
 
     pub fn web_url(&self) -> Option<&str> {
         self.links.web.as_ref().map(|link| link.href.as_str())
+    }
+
+    /// How many days this listing has been up, as of `now`.
+    ///
+    /// `None` when Reverb gave no publication date, or gave one in the future — a clock
+    /// disagreement is not evidence of anything and must not read as "listed today".
+    pub fn days_listed(&self, now: DateTime<Utc>) -> Option<i64> {
+        let published = self.published_at.as_ref()?;
+        let published = DateTime::parse_from_rfc3339(published)
+            .ok()?
+            .with_timezone(&Utc);
+        let days = (now - published).num_days();
+        (days >= 0).then_some(days)
     }
 }
 
@@ -596,6 +618,32 @@ mod tests {
         let model: CatalogueModel =
             serde_json::from_str(r#"{"id": 1, "slug": "x", "title": "X"}"#).unwrap();
         assert!(model.product_ids().is_empty());
+    }
+
+    #[test]
+    fn a_listings_age_is_measured_or_withheld_but_never_guessed() {
+        let now = DateTime::parse_from_rfc3339("2026-08-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let listing = |published: &str| -> Listing {
+            serde_json::from_str(&format!(
+                "{{\"id\":1,\"condition\":{{\"slug\":\"good\",\"display_name\":\"Good\"}},
+                  \"price\":{{\"amount_cents\":100}},\"published_at\":{published}}}"
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            Some(30),
+            listing("\"2026-07-19T00:00:00Z\"").days_listed(now)
+        );
+        assert_eq!(
+            Some(0),
+            listing("\"2026-08-18T00:00:00Z\"").days_listed(now)
+        );
+        assert_eq!(None, listing("null").days_listed(now));
+        assert_eq!(None, listing("\"not a date\"").days_listed(now));
+        // A listing published in the future is a clock disagreement, not a new listing.
+        assert_eq!(None, listing("\"2027-01-01T00:00:00Z\"").days_listed(now));
     }
 
     #[test]

@@ -408,9 +408,7 @@ fn run_price(
             .map(AlternativeModel::of)
             .collect(),
         market: MarketSummary::of(&market),
-        bands: bands
-            .as_ref()
-            .map(|bands| BandTable::of(bands, &market.currency)),
+        bands: bands.as_ref().map(|bands| BandTable::of(bands, &market)),
         class: class.as_ref().map(ClassSummary::of),
         asking,
         listings,
@@ -637,9 +635,7 @@ fn run_listings(
         condition: arguments.filters.condition.label().to_string(),
         matched: market.total,
         shown: listings.len(),
-        bands: bands
-            .as_ref()
-            .map(|bands| BandTable::of(bands, &market.currency)),
+        bands: bands.as_ref().map(|bands| BandTable::of(bands, &market)),
         listings: listings
             .iter()
             .map(|listing| ListingSummary::of(listing, &market.currency, bands.as_ref()))

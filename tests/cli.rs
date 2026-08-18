@@ -25,6 +25,9 @@ struct Item {
     price_cents: i64,
     grade: &'static str,
     title: &'static str,
+    /// When the listing went up, as an RFC 3339 timestamp.
+    published_at: String,
+    offers: bool,
 }
 
 /// A stub Reverb.
@@ -185,7 +188,7 @@ fn listings_response(path: &str, inventory: &[Item], honour_condition: bool) -> 
         .skip((page - 1) * per_page)
         .take(per_page)
         .enumerate()
-        .map(|(index, item)| listing((index + 1) as u64, item.price_cents, item.grade, item.title))
+        .map(|(index, item)| listing_from((index + 1) as u64, item))
         .collect();
     json!({"total": total, "listings": listings})
 }
@@ -221,18 +224,55 @@ fn decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn listing(id: u64, price: i64, grade: &str, title: &str) -> Value {
-    json!({
+fn listing_from(id: u64, item: &Item) -> Value {
+    let mut value = json!({
         "id": id,
         "make": "Gibson",
-        "model": title,
-        "title": title,
+        "model": item.title,
+        "title": item.title,
         "year": "2021",
         "shop_name": "Test Shop",
-        "condition": {"slug": grade, "display_name": grade},
-        "price": {"amount_cents": price, "currency": "USD"},
+        "offers_enabled": item.offers,
+        "condition": {"slug": item.grade, "display_name": item.grade},
+        "price": {"amount_cents": item.price_cents, "currency": "USD"},
         "_links": {"web": {"href": format!("https://reverb.com/item/{id}")}}
-    })
+    });
+    if !item.published_at.is_empty() {
+        value["published_at"] = json!(item.published_at);
+    }
+    value
+}
+
+/// An RFC 3339 timestamp `days` before now, for a listing that has been up that long.
+fn listed_days_ago(days: i64) -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - days * 86_400;
+    // 1970-01-01 plus `seconds`, formatted by hand to keep the test free of dependencies.
+    let days_since_epoch = seconds / 86_400;
+    let (year, month, day) = civil_from_days(days_since_epoch);
+    format!("{year:04}-{month:02}-{day:02}T00:00:00Z")
+}
+
+/// Howard Hinnant's days-to-civil-date algorithm.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_prime + 2) / 5 + 1) as u32;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    } as u32;
+    (year + i64::from(month <= 2), month, day)
 }
 
 /// An inventory of `count` listings priced evenly from `low` to `high`.
@@ -242,6 +282,8 @@ fn inventory(count: i64, low: i64, high: i64) -> Vec<Item> {
             price_cents: low + (high - low) * index / (count - 1).max(1),
             grade: "excellent",
             title: "Gibson Les Paul Standard",
+            published_at: String::new(),
+            offers: false,
         })
         .collect()
 }
@@ -458,6 +500,8 @@ fn a_filter_the_server_ignores_is_reported_rather_than_passed_off_as_filtered() 
             price_cents: 100_000 + index * 5_000,
             grade: "brand-new",
             title: "Gibson Les Paul Standard",
+            published_at: String::new(),
+            offers: false,
         })
         .collect();
     let stub = Stub::start_with(stock, catalogue_routes(30), 0, false);
@@ -579,6 +623,62 @@ fn gear_reverb_has_no_catalogue_entry_for_is_flagged_rather_than_dressed_up() {
 }
 
 #[test]
+fn a_band_that_is_not_clearing_shows_the_age_of_what_is_stuck_in_it() {
+    // A market shaped like a real one: cheap listings turn over in a fortnight, dear ones
+    // have been sitting for years. That is the whole signal — Reverb will not say what
+    // anything sold for, but it will say how long the unsold have been waiting.
+    let stock: Vec<Item> = (0..100)
+        .map(|index| Item {
+            price_cents: 100_000 + index * 2_000,
+            grade: if index % 3 == 0 { "mint" } else { "excellent" },
+            title: "Gibson Les Paul Standard",
+            published_at: listed_days_ago(if index < 50 { 14 } else { 800 }),
+            offers: index % 4 != 0,
+        })
+        .collect();
+    let stub = Stub::start(stock, catalogue_routes(100), 0);
+    let report = json_of(&stub.run(&["price", "Les Paul", "--format", "json"]));
+
+    let bands = report["bands"]["bands"].as_array().unwrap();
+    let aged = |name: &str| -> i64 {
+        bands
+            .iter()
+            .find(|band| band["band"] == name)
+            .and_then(|band| band["days_listed"].as_i64())
+            .unwrap_or_else(|| panic!("no age for the {name} band: {bands:#?}"))
+    };
+    assert!(aged("steal") < 30, "the cheap end should be moving");
+    assert!(aged("premium") > 365, "the dear end should be stuck");
+    assert!(aged("premium") > aged("steal") * 10);
+
+    // And the reader is told how firm these asking prices are.
+    let offers = report["market"]["sellers_taking_offers"].as_f64().unwrap();
+    assert!((offers - 0.75).abs() < 0.02, "offers share was {offers}");
+
+    // Condition is reported best grade first, whatever order the listings arrived in.
+    let grades: Vec<&str> = report["market"]["grades"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|grade| grade["grade"].as_str().unwrap())
+        .collect();
+    // The stub reports its display names in lower case; what matters is the order.
+    assert_eq!(vec!["mint", "excellent"], grades);
+}
+
+#[test]
+fn a_market_with_no_publication_dates_simply_omits_the_ages() {
+    // Nothing invented from an absent date: no age is better than a wrong one.
+    let stub = Stub::start(inventory(60, 100_000, 300_000), catalogue_routes(60), 0);
+    let report = json_of(&stub.run(&["price", "Les Paul", "--format", "json"]));
+    let bands = report["bands"]["bands"].as_array().unwrap();
+    assert!(
+        bands.iter().all(|band| band["days_listed"].is_null()),
+        "ages appeared from nowhere: {bands:?}"
+    );
+}
+
+#[test]
 fn an_unknown_category_fails_instead_of_silently_pricing_the_whole_marketplace() {
     let stub = Stub::start(Vec::new(), empty_market_routes(), 0);
     let output = stub.run(&["classes", "electric-guitar"]);
@@ -609,6 +709,8 @@ fn csv_output_is_a_flat_table_and_defuses_spreadsheet_formulas() {
             grade: "excellent",
             // A seller-controlled title that a spreadsheet would otherwise execute.
             title: "=HYPERLINK(\"http://evil.invalid\")",
+            published_at: String::new(),
+            offers: false,
         })
         .collect();
     let stub = Stub::start(hostile, catalogue_routes(20), 0);

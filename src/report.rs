@@ -108,6 +108,13 @@ pub struct MarketSummary {
     pub grades: Vec<GradeCount>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub histogram: Vec<HistogramBand>,
+    /// Share of sellers who accept offers, so a reader knows how firm these prices are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sellers_taking_offers: Option<f64>,
+    /// How many listings the ages and condition figures were read from, and whether that
+    /// is the whole market or a sample across it.
+    pub listings_read: usize,
+    pub listings_read_is_complete: bool,
 }
 
 impl MarketSummary {
@@ -130,9 +137,13 @@ impl MarketSummary {
             grades: market
                 .grades
                 .iter()
-                .map(|(grade, count)| GradeCount {
-                    grade: grade.clone(),
-                    listings: *count,
+                .map(|grade| GradeCount {
+                    grade: grade.grade.clone(),
+                    listings: grade.listings,
+                    median: grade.median.major(currency),
+                    against_median: market
+                        .median()
+                        .map(|overall| grade.median.major(currency) - overall.major(currency)),
                 })
                 .collect(),
             histogram: market
@@ -144,6 +155,9 @@ impl MarketSummary {
                     listings: *count,
                 })
                 .collect(),
+            sellers_taking_offers: market.offers_share(),
+            listings_read: market.observations.len(),
+            listings_read_is_complete: market.observations_complete,
         }
     }
 }
@@ -158,6 +172,11 @@ pub struct PercentilePoint {
 pub struct GradeCount {
     pub grade: String,
     pub listings: u32,
+    /// The median asking price for this grade.
+    pub median: f64,
+    /// How that compares to the market's median across all grades.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub against_median: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,7 +192,8 @@ pub struct BandTable {
 }
 
 impl BandTable {
-    pub fn of(bands: &Bands, currency: &str) -> Self {
+    pub fn of(bands: &Bands, market: &Market) -> Self {
+        let currency = market.currency.as_str();
         Self {
             bands: Band::ALL
                 .into_iter()
@@ -185,6 +205,7 @@ impl BandTable {
                         from: from.map(|price| price.major(currency)),
                         to: to.map(|price| price.major(currency)),
                         share: high - low,
+                        days_listed: market.days_listed_between(from, to),
                         verdict: band.verdict().to_string(),
                     }
                 })
@@ -201,6 +222,10 @@ pub struct BandRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<f64>,
     pub share: f64,
+    /// Median days the listings in this band have been on the market. The signal that
+    /// separates a price people pay from a price people ignore.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days_listed: Option<i64>,
     pub verdict: String,
 }
 
@@ -392,9 +417,22 @@ mod tests {
                 (0.95, Money::from_minor(320_000)),
             ],
             mean: Some(Money::from_minor(231_000)),
-            grades: vec![("Excellent".into(), 68), ("Very Good".into(), 40)],
+            grades: vec![
+                crate::market::GradePrice {
+                    grade: "Excellent".into(),
+                    listings: 68,
+                    median: Money::from_minor(229_000),
+                },
+                crate::market::GradePrice {
+                    grade: "Very Good".into(),
+                    listings: 40,
+                    median: Money::from_minor(210_000),
+                },
+            ],
             method: Method::Enumerated { listings: 174 },
             sample: Vec::new(),
+            observations: Vec::new(),
+            observations_complete: true,
             histogram: vec![(Money::from_minor(175_000), Money::from_minor(200_000), 30)],
             warnings: Vec::new(),
         }
@@ -416,7 +454,7 @@ mod tests {
     fn band_rows_shade_the_whole_line_and_shares_add_to_one() {
         let market = market();
         let bands = Bands::of(&market).unwrap();
-        let table = BandTable::of(&bands, "USD");
+        let table = BandTable::of(&bands, &market);
         assert_eq!(5, table.bands.len());
         assert_eq!(None, table.bands[0].from);
         assert_eq!(None, table.bands[4].to);

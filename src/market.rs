@@ -8,8 +8,30 @@
 //!
 //! Both paths produce the same percentiles. Only the extras differ, and the report says
 //! which path it took so a reader is never guessing.
+//!
+//! # What is still on the shelf
+//!
+//! Reverb retired its sold-price endpoint, so there is no record of what anything went
+//! for. There is, however, the date every live listing went up — and a live market is a
+//! survivorship sample. Listings priced where the market clears leave, because they sell;
+//! listings priced above it stay, and pile up. So the age of what is still for sale is
+//! evidence about which asking prices are being paid, from the opposite direction:
+//!
+//! ```text
+//! Fender American Professional II Stratocaster, used
+//!   cheapest fifth   $900-$1,300     median 28 days listed
+//!   dearest fifth    $1,640          median 1,985 days listed
+//! ```
+//!
+//! Those $1,640 listings have been up for five and a half years. A percentile can say
+//! that $1,640 is the ninetieth; only the dates can say that nobody is paying it.
+//!
+//! It is an inference and it is reported as one. A dealer's standing inventory listing
+//! ages without meaning anything, and a relisted item resets its own clock. The signal
+//! survives both because it is a median over a band, not a claim about any one listing.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
 use crate::money::Money;
@@ -24,6 +46,13 @@ const ENUMERATION_LIMIT: u32 = 600;
 
 /// How many listings to keep for display when the market was measured rather than read.
 const SAMPLE_SIZE: u32 = MAX_PER_PAGE;
+
+/// How many price windows to sample a counted market across.
+///
+/// Reading only the cheapest page would describe the cheapest page. Ages and condition
+/// vary most between the bottom of a market and the top, which is exactly what a single
+/// sorted page cannot see.
+const SAMPLE_WINDOWS: usize = 5;
 
 /// Bars in the shape-of-the-market histogram.
 const HISTOGRAM_BANDS: usize = 8;
@@ -49,6 +78,63 @@ impl Method {
     }
 }
 
+/// What one condition grade costs on this market.
+#[derive(Clone, Debug)]
+pub struct GradePrice {
+    pub grade: String,
+    pub listings: u32,
+    pub median: Money,
+}
+
+/// Reverb's condition grades, best first.
+///
+/// Ordering the table this way rather than by popularity is what lets a reader see
+/// whether condition actually tracks price on a given model. Often it does not: on the
+/// American Professional II Stratocaster the `Good` examples ask more than the `Mint`
+/// ones. Sorted by how many listings each grade has, that reads as an arbitrary list;
+/// sorted by grade, it reads as the finding it is.
+const GRADE_ORDER: [&str; 10] = [
+    "brand-new",
+    "mint-inventory",
+    "mint",
+    "b-stock",
+    "excellent",
+    "very-good",
+    "good",
+    "fair",
+    "poor",
+    "non-functioning",
+];
+
+/// What to call a grade in the table.
+///
+/// Reverb reports `mint` and `mint-inventory` — a private seller's mint example and a
+/// dealer's unsold new-old stock — under the same display name, which puts two rows
+/// called "Mint" next to each other and makes the ladder unreadable.
+fn grade_name(slug: &str, display: String) -> String {
+    match slug {
+        "mint-inventory" => "Mint (dealer stock)".to_string(),
+        _ if display.is_empty() => slug.to_string(),
+        _ => display,
+    }
+}
+
+fn grade_rank(slug: &str) -> usize {
+    GRADE_ORDER
+        .iter()
+        .position(|known| *known == slug)
+        .unwrap_or(GRADE_ORDER.len())
+}
+
+/// One live listing, reduced to what the report reasons about.
+#[derive(Clone, Copy, Debug)]
+pub struct Observation {
+    pub price: Money,
+    /// Days on the market, where Reverb gave a usable publication date.
+    pub days_listed: Option<i64>,
+    pub offers: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct Market {
     pub currency: String,
@@ -59,11 +145,16 @@ pub struct Market {
     pub percentiles: Vec<(f64, Money)>,
     /// Only available when the market was enumerated.
     pub mean: Option<Money>,
-    /// Condition grade to count. Only populated when the market was enumerated.
-    pub grades: Vec<(String, u32)>,
+    /// What each condition grade is going for, commonest grade first.
+    pub grades: Vec<GradePrice>,
     pub method: Method,
     /// Listings kept for display, cheapest first.
     pub sample: Vec<Listing>,
+    /// Every listing the run actually read, reduced. Complete when the market was
+    /// enumerated; spread across the price range when it was counted.
+    pub observations: Vec<Observation>,
+    /// Whether [`Market::observations`] covers the whole market or a sample of it.
+    pub observations_complete: bool,
     /// Price band to how many listings fall in it.
     pub histogram: Vec<(Money, Money, u32)>,
     /// Anything noticed while measuring that the reader should know about.
@@ -85,6 +176,89 @@ impl Market {
     pub fn is_empty(&self) -> bool {
         self.total == 0
     }
+
+    /// Median days on the market for listings priced within a band.
+    ///
+    /// `None` when too few listings in that band carry a usable date to say anything —
+    /// a median of two listings is an anecdote.
+    pub fn days_listed_between(&self, from: Option<Money>, to: Option<Money>) -> Option<i64> {
+        const ENOUGH: usize = 4;
+        let mut ages: Vec<i64> = self
+            .observations
+            .iter()
+            .filter(|observation| from.is_none_or(|from| observation.price >= from))
+            .filter(|observation| to.is_none_or(|to| observation.price < to))
+            .filter_map(|observation| observation.days_listed)
+            .collect();
+        if ages.len() < ENOUGH {
+            return None;
+        }
+        ages.sort_unstable();
+        Some(ages[ages.len() / 2])
+    }
+
+    /// The share of sellers who will take an offer, so a reader knows how firm these
+    /// asking prices are.
+    pub fn offers_share(&self) -> Option<f64> {
+        (!self.observations.is_empty()).then(|| {
+            let accepting = self
+                .observations
+                .iter()
+                .filter(|observation| observation.offers)
+                .count();
+            accepting as f64 / self.observations.len() as f64
+        })
+    }
+}
+
+/// The median asking price for each condition grade present.
+///
+/// Between a mint example and a beaten one lies the whole reason two listings for the
+/// same model differ in price, and a single band across every grade hides it.
+fn grade_prices(listings: &[Listing]) -> Vec<GradePrice> {
+    let mut by_grade: Vec<(String, String, Vec<Money>)> = Vec::new();
+    for listing in listings {
+        let slug = listing.condition.slug.clone();
+        match by_grade.iter_mut().find(|(known, _, _)| *known == slug) {
+            Some((_, _, prices)) => prices.push(listing.amount()),
+            None => by_grade.push((
+                slug,
+                listing.condition.display_name.clone(),
+                vec![listing.amount()],
+            )),
+        }
+    }
+    let mut grades: Vec<(usize, GradePrice)> = by_grade
+        .into_iter()
+        .map(|(slug, display, mut prices)| {
+            prices.sort_unstable();
+            (
+                grade_rank(&slug),
+                GradePrice {
+                    listings: prices.len() as u32,
+                    median: prices[prices.len() / 2],
+                    grade: grade_name(&slug, display),
+                },
+            )
+        })
+        .collect();
+    grades.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.grade.cmp(&right.1.grade))
+    });
+    grades.into_iter().map(|(_, grade)| grade).collect()
+}
+
+fn observe(listings: &[Listing], now: DateTime<Utc>) -> Vec<Observation> {
+    listings
+        .iter()
+        .map(|listing| Observation {
+            price: listing.amount(),
+            days_listed: listing.days_listed(now),
+            offers: listing.offers_enabled,
+        })
+        .collect()
 }
 
 /// Measures the market for `search`, reporting the standard set of percentiles.
@@ -111,6 +285,8 @@ pub fn measure_at(client: &Client, search: &Search, percentiles: &[f64]) -> Resu
             grades: Vec::new(),
             method: Method::Enumerated { listings: 0 },
             sample: Vec::new(),
+            observations: Vec::new(),
+            observations_complete: true,
             histogram: Vec::new(),
             warnings: Vec::new(),
         });
@@ -162,21 +338,14 @@ fn enumerate(
         Money::from_minor((sum / i128::from(read.max(1))) as i64)
     });
 
-    let mut grades: Vec<(String, u32)> = Vec::new();
-    for listing in &fetched {
-        let grade = listing.condition.display_name.clone();
-        match grades.iter_mut().find(|(name, _)| *name == grade) {
-            Some((_, count)) => *count += 1,
-            None => grades.push((grade, 1)),
-        }
-    }
-    grades.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let grades = grade_prices(&fetched);
 
     let low = prices.first().copied().unwrap_or(Money::ZERO);
     let high = prices.last().copied().unwrap_or(Money::ZERO);
     let warnings = unfiltered_warning(&fetched, search.condition)
         .into_iter()
         .collect();
+    let observations = observe(&fetched, Utc::now());
     let sample = fetched
         .into_iter()
         .take(SAMPLE_SIZE as usize)
@@ -192,6 +361,8 @@ fn enumerate(
         grades,
         method: Method::Enumerated { listings: read },
         sample,
+        observations,
+        observations_complete: true,
         histogram,
         warnings,
     })
@@ -236,16 +407,36 @@ fn count(
         .map(|(fraction, price)| (*fraction, Money::from_major(*price as f64, &currency)))
         .collect();
 
-    let sample = client
-        .listings(
-            &Search {
-                sort: Sort::PriceAscending,
-                ..search.clone()
-            },
-            1,
-            SAMPLE_SIZE,
-        )?
-        .listings;
+    // Sampled across the price range rather than off the front. The cheapest fifty
+    // listings describe the cheapest fifty listings, and every question worth asking of
+    // them — how long has this been sitting, what condition is it — differs most between
+    // the bottom of a market and the top.
+    let edges: Vec<Money> = sketch
+        .quantiles
+        .iter()
+        .map(|(_, price)| Money::from_major(*price as f64, &currency))
+        .collect();
+    let windows = sample_windows(low, high, &edges);
+    let sampled: Vec<Vec<Listing>> = windows
+        .par_iter()
+        .map(|(from, to)| {
+            client
+                .listings(
+                    &Search {
+                        sort: Sort::PriceAscending,
+                        ..search.between(Some(*from), Some(*to))
+                    },
+                    1,
+                    SAMPLE_SIZE,
+                )
+                .map(|page| page.listings)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let spread: Vec<Listing> = sampled.into_iter().flatten().collect();
+    let observations = observe(&spread, Utc::now());
+    let mut sample = spread;
+    sample.sort_by_key(Listing::amount);
+    sample.truncate(SAMPLE_SIZE as usize);
 
     // Clipped to the middle ninety per cent. One vintage outlier at ten times the going
     // rate would otherwise stretch the range so far that every real listing lands in the
@@ -276,12 +467,14 @@ fn count(
         // Counting cannot produce a mean: it never sees the individual prices, and a mean
         // inferred from the curve would be a guess dressed as a statistic.
         mean: None,
-        grades: Vec::new(),
+        grades: grade_prices(&sample),
         method: Method::Counted { probes },
         warnings: unfiltered_warning(&sample, search.condition)
             .into_iter()
             .collect(),
         sample,
+        observations,
+        observations_complete: false,
         histogram,
     })
 }
@@ -305,6 +498,22 @@ fn unfiltered_warning(listings: &[Listing], condition: Condition) -> Option<Stri
             listings.len()
         )
     })
+}
+
+/// Price windows to sample a counted market across, from the percentiles already known.
+fn sample_windows(low: Money, high: Money, edges: &[Money]) -> Vec<(Money, Money)> {
+    let mut cuts: Vec<Money> = vec![low];
+    if !edges.is_empty() {
+        // Spread the chosen cuts evenly through the percentiles rather than taking the
+        // first few, so the windows span the market instead of crowding its cheap end.
+        for step in 1..SAMPLE_WINDOWS {
+            let index = step * edges.len() / SAMPLE_WINDOWS;
+            cuts.push(edges[index.min(edges.len() - 1)]);
+        }
+    }
+    cuts.push(high);
+    cuts.dedup();
+    cuts.windows(2).map(|pair| (pair[0], pair[1])).collect()
 }
 
 fn edge_listing(client: &Client, search: &Search, sort: Sort) -> Result<Option<Listing>> {
@@ -366,6 +575,146 @@ mod tests {
 
     fn money(major: i64) -> Money {
         Money::from_minor(major * 100)
+    }
+
+    fn listing_at(price: i64, grade: &str) -> Listing {
+        let slug = grade.to_lowercase().replace(' ', "-");
+        serde_json::from_str(&format!(
+            "{{\"id\":1,\"condition\":{{\"slug\":\"{slug}\",\"display_name\":\"{grade}\"}},
+              \"price\":{{\"amount_cents\":{price}}}}}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn each_condition_grade_reports_its_own_median() {
+        let listings = vec![
+            listing_at(260_000, "Mint"),
+            listing_at(229_000, "Excellent"),
+            listing_at(231_000, "Excellent"),
+            listing_at(235_000, "Excellent"),
+            listing_at(186_000, "Good"),
+        ];
+        let grades = grade_prices(&listings);
+        // Best grade first, so a reader can see at a glance whether condition tracks price
+        // on this model — which, often enough, it does not.
+        assert_eq!(
+            vec!["Mint", "Excellent", "Good"],
+            grades.iter().map(|g| g.grade.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(3, grades[1].listings);
+        assert_eq!(money(2_310), grades[1].median);
+        assert_eq!(money(2_600), grades[0].median);
+        assert!(grade_prices(&[]).is_empty());
+
+        // Reverb calls a dealer's unsold stock "Mint" too; two rows of that name in one
+        // ladder read as a bug.
+        let both = vec![
+            listing_at(260_000, "Mint"),
+            listing_at(255_000, "Mint"),
+            serde_json::from_str::<Listing>(
+                "{\"id\":2,\"condition\":{\"slug\":\"mint-inventory\",\"display_name\":\"Mint\"},
+                  \"price\":{\"amount_cents\":270000}}",
+            )
+            .unwrap(),
+        ];
+        let priced = grade_prices(&both);
+        let named: Vec<&str> = priced.iter().map(|grade| grade.grade.as_str()).collect();
+        assert_eq!(vec!["Mint (dealer stock)", "Mint"], named);
+    }
+
+    #[test]
+    fn a_bands_typical_age_needs_enough_listings_to_be_a_median() {
+        let observation = |price: i64, days: Option<i64>| Observation {
+            price: money(price),
+            days_listed: days,
+            offers: false,
+        };
+        let mut market = empty_market();
+        market.observations = vec![
+            observation(1_000, Some(10)),
+            observation(1_100, Some(20)),
+            observation(1_200, Some(30)),
+            observation(1_300, Some(400)),
+            observation(9_000, Some(900)),
+        ];
+        // Four listings in the window, so a median is worth quoting. Even counts take the
+        // upper middle, the same convention the percentiles use.
+        assert_eq!(
+            Some(30),
+            market.days_listed_between(Some(money(1_000)), Some(money(2_000)))
+        );
+        // One is not.
+        assert_eq!(None, market.days_listed_between(Some(money(5_000)), None));
+        // Listings with no date are left out rather than counted as new.
+        market.observations.push(observation(1_150, None));
+        assert_eq!(
+            Some(30),
+            market.days_listed_between(Some(money(1_000)), Some(money(2_000)))
+        );
+    }
+
+    #[test]
+    fn the_share_taking_offers_is_reported_only_when_something_was_read() {
+        let mut market = empty_market();
+        assert_eq!(None, market.offers_share());
+        market.observations = vec![
+            Observation {
+                price: money(1),
+                days_listed: None,
+                offers: true,
+            },
+            Observation {
+                price: money(2),
+                days_listed: None,
+                offers: true,
+            },
+            Observation {
+                price: money(3),
+                days_listed: None,
+                offers: false,
+            },
+            Observation {
+                price: money(4),
+                days_listed: None,
+                offers: false,
+            },
+        ];
+        assert_eq!(Some(0.5), market.offers_share());
+    }
+
+    fn empty_market() -> Market {
+        Market {
+            currency: "USD".into(),
+            total: 0,
+            low: Money::ZERO,
+            high: Money::ZERO,
+            percentiles: Vec::new(),
+            mean: None,
+            grades: Vec::new(),
+            method: Method::Counted { probes: 0 },
+            sample: Vec::new(),
+            observations: Vec::new(),
+            observations_complete: false,
+            histogram: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sampling_windows_span_the_market_rather_than_crowding_its_cheap_end() {
+        let edges: Vec<Money> = [1_600, 1_750, 2_090, 2_275, 2_450, 2_880, 3_200]
+            .iter()
+            .map(|major| money(*major))
+            .collect();
+        let windows = sample_windows(money(1_500), money(4_900), &edges);
+        assert_eq!(SAMPLE_WINDOWS, windows.len());
+        // Contiguous, and covering the whole range from cheapest to dearest.
+        assert_eq!(money(1_500), windows[0].0);
+        assert_eq!(money(4_900), windows[windows.len() - 1].1);
+        for pair in windows.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0);
+        }
     }
 
     #[test]

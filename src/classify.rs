@@ -258,6 +258,8 @@ mod tests {
             grades: Vec::new(),
             method: Method::Counted { probes: 0 },
             sample: Vec::new(),
+            observations: Vec::new(),
+            observations_complete: true,
             histogram: Vec::new(),
             warnings: Vec::new(),
         }
