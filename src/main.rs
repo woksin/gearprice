@@ -492,9 +492,27 @@ fn with_default_command(arguments: impl Iterator<Item = String>) -> Vec<String> 
         .get_subcommands()
         .flat_map(|command| std::iter::once(command.get_name()).chain(command.get_all_aliases()))
         .collect();
-    let takes_default = arguments
-        .get(1)
-        .is_some_and(|first| !first.starts_with('-') && !known.contains(&first.as_str()));
+    // A flag that only `price` has means `price` was meant. `gearprice --model-id 137981`
+    // is the natural way to price the model an earlier `models` run just printed, and
+    // making somebody type the subcommand for that and not for a bare query is a
+    // distinction only the argument parser cares about.
+    let priced: Vec<String> = definition
+        .find_subcommand("price")
+        .into_iter()
+        .flat_map(clap::Command::get_arguments)
+        .filter_map(clap::Arg::get_long)
+        .filter(|long| {
+            !definition
+                .get_arguments()
+                .any(|global| global.get_long() == Some(long))
+        })
+        .map(|long| format!("--{long}"))
+        .collect();
+    let takes_default = arguments.get(1).is_some_and(|first| {
+        let bare = first.split('=').next().unwrap_or(first);
+        (!first.starts_with('-') && !known.contains(&first.as_str()))
+            || priced.iter().any(|long| long == bare)
+    });
     if takes_default {
         arguments.insert(1, "price".to_string());
     }
@@ -1857,6 +1875,21 @@ mod tests {
         assert_eq!(
             vec!["gearprice", "--help"],
             filled(&["gearprice", "--help"])
+        );
+        // But a flag only `price` has says which command was meant, since `models` prints
+        // ids expressly so they can be fed straight back in.
+        assert_eq!(
+            vec!["gearprice", "price", "--model-id", "137981"],
+            filled(&["gearprice", "--model-id", "137981"])
+        );
+        assert_eq!(
+            vec!["gearprice", "price", "--asking=1900", "les paul"],
+            filled(&["gearprice", "--asking=1900", "les paul"])
+        );
+        // A global flag is not a hint about the command, because every command has it.
+        assert_eq!(
+            vec!["gearprice", "--currency", "NOK", "classes", "amps"],
+            filled(&["gearprice", "--currency", "NOK", "classes", "amps"])
         );
         assert_eq!(vec!["gearprice"], filled(&["gearprice"]));
     }

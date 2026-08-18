@@ -169,8 +169,16 @@ Each of these came from a real error made during the Marshall Major session:
   something.
 - **Flag a listing whose title disagrees with the model it is pinned to.** A listing
   titled `Vintage 1968 Marshall Plexi Amplifier Head` sits in the Major catalogue entry.
-  It may be right; the reader should be told to look. *(Still to do — the rest of this
-  section is built.)*
+  It may be right; the reader should be told to look. *(Tried and abandoned. Deciding
+  "does this title describe this model" needs the model's distinctive words, and real
+  listings routinely drop them: half the genuine Marshall Majors never write "JMP", and
+  a listing titled exactly `Boss DS-1` omits the "Distortion" the catalogue calls it.
+  Requiring only the words most of a model's own listings use fixed the Major and still
+  flagged `Boss DS-1` as not being a Boss DS-1. Every threshold traded one false positive
+  for another, and a warning that cries wolf on the correct listings is worse than no
+  warning. The widening path already applies this test where it is cheap to be wrong —
+  keeping something out of a market it does not belong in — and that is the right place
+  for it.)*
 
 ---
 
