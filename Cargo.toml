@@ -1,0 +1,39 @@
+[package]
+name = "gearprice"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Price and price-class guitar gear from the live Reverb marketplace"
+license = "MIT"
+repository = "https://github.com/woksin/gearprice"
+homepage = "https://github.com/woksin/gearprice"
+readme = "README.md"
+keywords = ["guitar", "reverb", "pricing", "marketplace", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "gearprice"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+csv = "1.3"
+flate2 = "1.1"
+rayon = "1.10"
+self-replace = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+tar = { version = "0.4", default-features = false }
+tempfile = "3.20"
+ureq = "3.4"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true
+
+[lints.rust]
+unsafe_code = "deny"

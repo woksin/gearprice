@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="280" viewBox="0 0 1000 280" role="img" aria-labelledby="title description">
+  <title id="title">gearprice</title>
+  <description id="description">What guitar gear costs on Reverb right now, and what class it sits in</description>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1a0f08"/>
+      <stop offset="0.55" stop-color="#2b1a0f"/>
+      <stop offset="1" stop-color="#12212b"/>
+    </linearGradient>
+    <linearGradient id="bands" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4ade80"/>
+      <stop offset="0.5" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#f87171"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1000" height="280" rx="18" fill="url(#background)"/>
+
+  <!-- The distribution of a market, with the going rate lit up in the middle. -->
+  <g transform="translate(70 150)" opacity="0.85">
+    <rect x="0"   y="52" width="34" height="26" rx="3" fill="#4ade80" opacity="0.35"/>
+    <rect x="40"  y="34" width="34" height="44" rx="3" fill="#4ade80" opacity="0.55"/>
+    <rect x="80"  y="10" width="34" height="68" rx="3" fill="#38bdf8" opacity="0.8"/>
+    <rect x="120" y="-6" width="34" height="84" rx="3" fill="#38bdf8" filter="url(#glow)"/>
+    <rect x="160" y="14" width="34" height="64" rx="3" fill="#38bdf8" opacity="0.8"/>
+    <rect x="200" y="40" width="34" height="38" rx="3" fill="#fbbf24" opacity="0.6"/>
+    <rect x="240" y="58" width="34" height="20" rx="3" fill="#f87171" opacity="0.5"/>
+    <rect x="280" y="68" width="34" height="10" rx="3" fill="#f87171" opacity="0.35"/>
+    <rect x="0" y="92" width="314" height="3" rx="1.5" fill="url(#bands)" opacity="0.9"/>
+  </g>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <text x="440" y="120" font-size="62" font-weight="600" fill="#fef3c7">gearprice</text>
+    <text x="443" y="158" font-size="20" fill="#93c5fd">what it costs, and what class it is</text>
+    <text x="443" y="196" font-size="15" fill="#94a3b8">reverb market bands · entry → boutique · no account needed</text>
+  </g>
+</svg>
