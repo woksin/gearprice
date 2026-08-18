@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Spelling correction for queries, against Reverb's own vocabulary of every brand and
+  model name in its catalogue. `gibsen les pual standrd` finds the Les Paul Standard,
+  where Reverb's own search returns nothing at all.
+- Ranked model resolution: candidates are scored on how much of the query the title
+  accounts for, how much of the title was not asked for, and how much of that model is on
+  the market. Reported as `interpreted_as` when the spelling had to be corrected.
+- Close matches are listed with the `--model-id` needed to price them instead, whenever
+  something fits the query about as well as the model that was priced.
+- A warning when the best catalogue match is a poor fit, rather than presenting it as the
+  answer.
+- `--raw` on `listings`, matching `price`.
+
+### Changed
+
+- `gearprice listings` resolves to a catalogue model like `price` does, so a search for
+  `Boss DS-1` no longer prices the T-shirt, the knob set and the footswitch cover
+  alongside the pedal.
+- `gearprice models` orders results by the same ranking, rather than by Reverb relevance.
+
+### Fixed
+
+- Whitespace in catalogue and listing text is collapsed as it is parsed. Reverb ships
+  entries like `Squier\tParanormal Jazzmaster XII`, and a tab reaching a table shifted
+  every column after it.
+- A model in a category the tree does not know now skips the price class with a warning
+  instead of failing the whole report.
+
 ## [0.1.0]
 
 ### Added

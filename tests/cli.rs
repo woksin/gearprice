@@ -279,6 +279,44 @@ fn catalogue_routes(used_total: i64) -> HashMap<String, Value> {
     routes
 }
 
+/// Catalogue routes for a stub that answers `/csps` only for the exactly-right spelling,
+/// the way Reverb does — two typos in one query and it returns nothing at all.
+fn fussy_catalogue_routes() -> HashMap<String, Value> {
+    let mut routes = catalogue_routes(100);
+    routes.remove("/csps");
+    // Matched on the encoded query, so only the corrected spelling finds anything.
+    routes.insert(
+        "/csps&query=gibson+les+paul+standard".to_string(),
+        json!({"total": 1, "comparison_shopping_pages": [{
+            "id": 104713,
+            "slug": "gibson-les-paul-standard",
+            "title": "Gibson Les Paul Standard",
+            "brand": {"name": "Gibson"},
+            "used_total": 190,
+            "new_total": 40,
+            "root_category_slug": "electric-guitars",
+            "_links": {"listings": {"href": "https://api.reverb.com/api/listings/all?cp_ids%5B%5D=219711"}}
+        }]}),
+    );
+    routes.insert(
+        "/csps".to_string(),
+        json!({"total": 0, "comparison_shopping_pages": []}),
+    );
+    // Reverb's vocabulary dump, which is what the spelling is corrected against.
+    routes.insert(
+        "/autocomplete".to_string(),
+        json!({
+            "makes": ["Gibson", "Fender", "Epiphone", "Boss"],
+            "models": [
+                "Les Paul Standard", "Les Paul Standard '60s", "Les Paul Studio",
+                "Standard Stratocaster", "Standard Telecaster", "Dual Rectifier",
+                "Paul Reed Smith Custom", "Paul Bearer", "Standard Jazzmaster"
+            ]
+        }),
+    );
+    routes
+}
+
 /// Catalogue routes plus an explicitly empty `/listings`, for the nothing-for-sale case.
 fn empty_market_routes() -> HashMap<String, Value> {
     let mut routes = catalogue_routes(0);
@@ -456,6 +494,87 @@ fn an_empty_market_reports_nothing_rather_than_inventing_a_price() {
             .unwrap_or_default()
             .contains("no used listings match")),
         "{warnings:?}"
+    );
+}
+
+#[test]
+fn a_query_reverbs_own_search_cannot_spell_is_corrected_and_found() {
+    // `/csps` here answers only for the exactly-right spelling, which is how Reverb
+    // behaves: two typos in one query returns nothing at all.
+    let stub = Stub::start(
+        inventory(100, 100_000, 300_000),
+        fussy_catalogue_routes(),
+        0,
+    );
+    let report = json_of(&stub.run(&["price", "gibsen les pual standrd", "--format", "json"]));
+
+    assert_eq!("Gibson Les Paul Standard", report["model"]["title"]);
+    // And it says what it did, rather than quietly answering a different question.
+    assert_eq!("gibson les paul standard", report["interpreted_as"]);
+    assert!(report["market"]["listings"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn a_correctly_spelled_query_never_pays_for_the_dictionary() {
+    let stub = Stub::start(
+        inventory(100, 100_000, 300_000),
+        fussy_catalogue_routes(),
+        0,
+    );
+    let report = json_of(&stub.run(&["price", "gibson les paul standard", "--format", "json"]));
+    assert_eq!("Gibson Les Paul Standard", report["model"]["title"]);
+    // Nothing to correct, so nothing to report and no vocabulary fetched.
+    assert!(report["interpreted_as"].is_null());
+}
+
+#[test]
+fn models_that_fit_the_query_equally_well_are_offered_rather_than_hidden() {
+    let mut routes = catalogue_routes(100);
+    routes.insert(
+        "/csps".to_string(),
+        json!({"total": 2, "comparison_shopping_pages": [
+            {"id": 1, "slug": "a", "title": "Epiphone Casino (2023 - Present)",
+             "brand": {"name": "Epiphone"}, "used_total": 10, "new_total": 16,
+             "root_category_slug": "electric-guitars",
+             "_links": {"listings": {"href": "https://api.reverb.com/api/listings?cp_ids%5B%5D=1"}}},
+            {"id": 2, "slug": "b", "title": "Epiphone Casino Reissue 1995 - 2004",
+             "brand": {"name": "Epiphone"}, "used_total": 30, "new_total": 0,
+             "root_category_slug": "electric-guitars",
+             "_links": {"listings": {"href": "https://api.reverb.com/api/listings?cp_ids%5B%5D=2"}}}
+        ]}),
+    );
+    let stub = Stub::start(inventory(50, 50_000, 90_000), routes, 0);
+    let report = json_of(&stub.run(&["price", "epiphone casino", "--format", "json"]));
+
+    let alternatives = report["alternatives"].as_array().unwrap();
+    assert_eq!(1, alternatives.len(), "{alternatives:?}");
+    // Named with the id needed to price it instead, not just mentioned.
+    assert!(alternatives[0]["id"].is_number());
+    assert_ne!(report["model"]["id"], alternatives[0]["id"]);
+}
+
+#[test]
+fn gear_reverb_has_no_catalogue_entry_for_is_flagged_rather_than_dressed_up() {
+    let mut routes = catalogue_routes(100);
+    routes.insert(
+        "/csps".to_string(),
+        json!({"total": 1, "comparison_shopping_pages": [
+            {"id": 9, "slug": "bag", "title": "Gator Icon Bass Gig Bag",
+             "brand": {"name": "Gator"}, "used_total": 9, "new_total": 0,
+             "root_category_slug": "accessories",
+             "_links": {"listings": {"href": "https://api.reverb.com/api/listings?cp_ids%5B%5D=9"}}}
+        ]}),
+    );
+    let stub = Stub::start(inventory(20, 10_000, 40_000), routes, 0);
+    let report = json_of(&stub.run(&["price", "a bag of crisps", "--format", "json"]));
+
+    let warnings = report["diagnostics"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .unwrap_or_default()
+            .contains("not a close thing")),
+        "a poor match should say so: {warnings:?}"
     );
 }
 

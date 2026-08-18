@@ -10,6 +10,7 @@ mod progress;
 mod quantile;
 mod query;
 mod report;
+mod resolve;
 mod reverb;
 mod taxonomy;
 mod update;
@@ -27,8 +28,9 @@ use output::{Format, Style};
 use progress::Progress;
 use query::{Condition, Search, Sort};
 use report::{
-    AskingVerdict, BandTable, ClassReport, ClassRow, ClassSummary, Diagnostics, ListingReport,
-    ListingSummary, MarketSummary, ModelReport, ModelRow, ModelSummary, PriceReport, SOURCE,
+    AlternativeModel, AskingVerdict, BandTable, ClassReport, ClassRow, ClassSummary, Diagnostics,
+    ListingReport, ListingSummary, MarketSummary, ModelReport, ModelRow, ModelSummary, PriceReport,
+    SOURCE,
 };
 use reverb::{CatalogueModel, Client, DEFAULT_REQUEST_BUDGET, MAX_PER_PAGE};
 use taxonomy::{Selector, Taxonomy};
@@ -324,13 +326,14 @@ fn run_price(
     let mut warnings = Vec::new();
 
     progress.set("Resolving the model");
-    let model = resolve_model(
+    let resolution = resolve_model(
         client,
         arguments.model_id,
         arguments.raw,
         &words,
         &mut warnings,
     )?;
+    let model = resolution.chosen.clone();
 
     let mut search = match &model {
         Some(model) if !model.product_ids().is_empty() => Search::products(model.product_ids()),
@@ -398,6 +401,12 @@ fn run_price(
         currency: market.currency.clone(),
         condition: arguments.filters.condition.label().to_string(),
         model: model.as_ref().map(ModelSummary::of),
+        interpreted_as: resolution.interpreted_as.clone(),
+        alternatives: resolution
+            .alternatives
+            .iter()
+            .map(AlternativeModel::of)
+            .collect(),
         market: MarketSummary::of(&market),
         bands: bands
             .as_ref()
@@ -423,36 +432,41 @@ fn run_price(
 /// notes. A text search returns all of them and the cheap junk lands in the `steal` band,
 /// which is exactly the wrong answer. Pinning to the catalogue model searches the
 /// products Reverb has identified as that piece of gear.
+///
+/// See [`crate::resolve`] for how a misspelled or abbreviated query gets there.
 fn resolve_model(
     client: &Client,
     model_id: Option<u64>,
     raw: bool,
     words: &str,
     warnings: &mut Vec<String>,
-) -> Result<Option<CatalogueModel>> {
+) -> Result<resolve::Resolution> {
     if let Some(id) = model_id {
-        return Ok(Some(client.model(id).with_context(|| {
+        let model = client.model(id).with_context(|| {
             format!("no catalogue model has id {id} — find one with `gearprice models`")
-        })?));
+        })?;
+        return Ok(resolve::Resolution::of(model));
     }
     if raw {
-        return Ok(None);
+        return Ok(resolve::Resolution::none());
     }
-    let page = client.models(words, 5)?;
-    let Some(model) = page.models.first().cloned() else {
+    let resolution = resolve::resolve(client, words, 12)?;
+    let Some(model) = resolution.chosen.as_ref() else {
         warnings.push(format!(
-            "no catalogue model matches {words:?}, so this prices the words themselves — \
-             results may include unrelated gear"
+            "nothing in Reverb's catalogue matches {words:?}, so this prices the words \
+             themselves and may include unrelated gear. `gearprice models` searches the \
+             catalogue directly."
         ));
-        return Ok(None);
+        return Ok(resolution);
     };
-    if page.models.len() > 1 {
+    if resolution.is_weak() {
         warnings.push(format!(
-            "{} models matched; priced the closest. See the rest with `gearprice models {words:?}`",
-            page.total.max(page.models.len() as u32)
+            "{:?} is the closest thing in Reverb's catalogue to {words:?}, and it is not a \
+             close thing — check it is what you meant before trusting these numbers",
+            model.title
         ));
     }
-    Ok(Some(model))
+    Ok(resolution)
 }
 
 /// Places a model's median against its category.
@@ -485,8 +499,18 @@ fn price_class(
                 );
                 return Ok(None);
             };
-            let resolved = Taxonomy::load(client)?.resolve(&slug)?;
-            (resolved.product_type, resolved.category, resolved.label)
+            // A category the tree does not know is a reason to skip the class, not to
+            // fail the report: the bands above it are measured and correct either way.
+            // A category the *caller* typed still errors — that one is theirs to fix.
+            match Taxonomy::load(client).and_then(|tree| tree.resolve(&slug)) {
+                Ok(resolved) => (resolved.product_type, resolved.category, resolved.label),
+                Err(error) => {
+                    warnings.push(format!(
+                        "no price class: cannot place {slug:?} in Reverb's category tree ({error})"
+                    ));
+                    return Ok(None);
+                }
+            }
         }
     };
     let peers = Search {
@@ -518,18 +542,22 @@ fn run_models(
         bail!("say what to look for, for example: gearprice models \"les paul standard\"");
     }
     progress.set("Searching the catalogue");
-    let page = client.models(&words, arguments.limit.min(MAX_PER_PAGE))?;
+    let resolution = resolve::resolve(client, &words, arguments.limit.min(MAX_PER_PAGE))?;
+    let mut warnings = Vec::new();
+    if let Some(reading) = &resolution.interpreted_as {
+        warnings.push(format!("read {words:?} as {reading:?}"));
+    }
+    let models = resolution.ranked;
     let report = ModelReport {
         query: words,
         source: SOURCE,
         generated_at: timestamp(),
         currency: client.currency().to_string(),
-        models: page
-            .models
+        models: models
             .iter()
             .map(|model| ModelRow::of(model, client.currency()))
             .collect(),
-        diagnostics: Diagnostics::from(client.usage(), Vec::new()),
+        diagnostics: Diagnostics::from(client.usage(), warnings),
     };
     match cli.format {
         Format::Table => output::print_models(&report, style),
@@ -559,7 +587,8 @@ fn run_listings(
         arguments.raw || words.is_empty(),
         &words,
         &mut warnings,
-    )?;
+    )?
+    .chosen;
     let mut search = match &model {
         Some(model) if !model.product_ids().is_empty() => Search::products(model.product_ids()),
         Some(model) => Search::text(model.title.clone()),

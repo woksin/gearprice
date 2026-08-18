@@ -123,7 +123,36 @@ pub fn print_price(report: &PriceReport, style: Style) {
         style.dim(SOURCE_SHORT)
     );
     println!("  {:<21} {}", "Method", style.dim(&report.market.method));
+    if let Some(reading) = &report.interpreted_as {
+        println!(
+            "  {:<21} {} {}",
+            "Read as",
+            reading,
+            style.dim(&format!("(you typed “{}”)", report.query))
+        );
+    }
     print_warnings(&report.diagnostics, style);
+
+    if !report.alternatives.is_empty() {
+        println!();
+        println!(
+            "  {:<21} {}",
+            "Close matches",
+            style.dim("these fit what you typed about as well — price one with --model-id")
+        );
+        for other in &report.alternatives {
+            println!(
+                "  {:<21} {:<44} {}",
+                "",
+                truncate(&other.title, 44),
+                style.dim(&format!(
+                    "--model-id {:<9} {} used",
+                    other.id,
+                    number(other.used_listings)
+                ))
+            );
+        }
+    }
 
     if let Some(class) = &report.class {
         println!();

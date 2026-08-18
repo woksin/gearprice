@@ -29,6 +29,12 @@ pub struct PriceReport {
     pub condition: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelSummary>,
+    /// What the query was corrected to, when correcting it is what found the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interpreted_as: Option<String>,
+    /// Models that fit the query about as well as the one priced.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<AlternativeModel>,
     pub market: MarketSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bands: Option<BandTable>,
@@ -65,6 +71,26 @@ impl ModelSummary {
             used_listings: model.used_total,
             new_listings: model.new_total,
             products: model.product_ids().len(),
+        }
+    }
+}
+
+/// A model the query fits about as well as the one that was priced.
+#[derive(Debug, Serialize)]
+pub struct AlternativeModel {
+    pub id: u64,
+    pub title: String,
+    pub used_listings: u32,
+    pub new_listings: u32,
+}
+
+impl AlternativeModel {
+    pub fn of(model: &CatalogueModel) -> Self {
+        Self {
+            id: model.id,
+            title: model.title.clone(),
+            used_listings: model.used_total,
+            new_listings: model.new_total,
         }
     }
 }

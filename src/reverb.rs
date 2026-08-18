@@ -18,7 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::cache::ResponseCache;
 use crate::money::Money;
@@ -246,6 +246,17 @@ impl Client {
         Ok(self.listings(search, 1, 1)?.total)
     }
 
+    /// Reverb's own vocabulary: every brand it knows and every model name in its
+    /// catalogue.
+    ///
+    /// The endpoint ignores its `query` parameter and returns the same list every time,
+    /// which makes it useless as an autocomplete and ideal as a spelling dictionary —
+    /// one request, cached, and the words come from Reverb rather than from a list
+    /// hardcoded here that would rot.
+    pub fn vocabulary(&self) -> Result<Vocabulary> {
+        self.get_json(&format!("{}/autocomplete", api_root()))
+    }
+
     /// Catalogue models matching `query`, most relevant first.
     pub fn models(&self, query: &str, per_page: u32) -> Result<ModelPage> {
         let parameters = vec![
@@ -300,6 +311,20 @@ fn summarise_error_body(body: &str) -> String {
     }
 }
 
+/// Collapses runs of whitespace and trims, at the point text enters the program.
+///
+/// Reverb's own catalogue contains entries like `Squier\tParanormal Jazzmaster XII`, and
+/// seller-written listing titles contain worse. A tab reaching a table wrecks every
+/// column after it, so nothing downstream should have to remember to handle it.
+fn collapse<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<String, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    Ok(collapse_whitespace(&raw))
+}
+
+pub fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn user_agent() -> String {
     format!(
         "gearprice/{} (+https://github.com/woksin/gearprice)",
@@ -350,15 +375,15 @@ pub struct ListingPage {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Listing {
     pub id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "collapse")]
     pub make: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "collapse")]
     pub model: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "collapse")]
     pub title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "collapse")]
     pub year: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "collapse")]
     pub shop_name: String,
     pub condition: Grade,
     pub price: Price,
@@ -404,7 +429,7 @@ pub struct Grade {
     /// condition that was asked for, so a filter the server ignored gets noticed.
     #[serde(default)]
     pub slug: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "collapse")]
     pub display_name: String,
 }
 
@@ -414,10 +439,17 @@ pub struct Price {
     pub amount_cents: i64,
 }
 
+/// Every brand and model name Reverb knows.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Vocabulary {
+    #[serde(default)]
+    pub makes: Vec<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ModelPage {
-    #[serde(default)]
-    pub total: u32,
     #[serde(rename = "comparison_shopping_pages", default)]
     pub models: Vec<CatalogueModel>,
 }
@@ -429,7 +461,7 @@ pub struct CatalogueModel {
     pub id: u64,
     #[serde(default)]
     pub slug: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "collapse")]
     pub title: String,
     #[serde(default)]
     pub brand: Option<Brand>,
@@ -492,7 +524,7 @@ pub struct ModelLinks {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Brand {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "collapse")]
     pub name: String,
 }
 
@@ -506,9 +538,9 @@ pub struct CategoryTree {
 pub struct Category {
     #[serde(default)]
     pub slug: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "collapse")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "collapse")]
     pub full_name: String,
     #[serde(default)]
     pub subcategories: Vec<Category>,
@@ -564,6 +596,27 @@ mod tests {
         let model: CatalogueModel =
             serde_json::from_str(r#"{"id": 1, "slug": "x", "title": "X"}"#).unwrap();
         assert!(model.product_ids().is_empty());
+    }
+
+    #[test]
+    fn catalogue_whitespace_never_reaches_a_table() {
+        // Reverb really does ship names like this; a tab would shift every column after
+        // it, and a newline would break the row in two.
+        let model: CatalogueModel = serde_json::from_str(
+            "{\"id\": 1, \"slug\": \"x\", \"title\": \"Squier\\tParanormal  Jazzmaster XII \"}",
+        )
+        .unwrap();
+        assert_eq!("Squier Paranormal Jazzmaster XII", model.title);
+
+        let page: ListingPage = serde_json::from_str(
+            "{\"total\": 1, \"listings\": [{\"id\": 1, \"title\": \" Gibson\\n Les  Paul \",
+             \"shop_name\": \"A\\tShop\",
+             \"condition\": {\"slug\": \"good\", \"display_name\": \"Good\"},
+             \"price\": {\"amount_cents\": 100}}]}",
+        )
+        .unwrap();
+        assert_eq!("Gibson Les Paul", page.listings[0].title);
+        assert_eq!("A Shop", page.listings[0].shop_name);
     }
 
     #[test]
