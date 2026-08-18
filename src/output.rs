@@ -642,6 +642,9 @@ fn print_listing_rows(listings: &[ListingSummary], currency: &str, style: Style)
         return;
     }
     let delivered = listings.iter().any(|listing| listing.shipping.is_some());
+    // Per listing rather than per band, because a market too thin for a band median is
+    // exactly the one where "this has been sitting for nineteen months" matters most.
+    let aged = listings.iter().any(|listing| listing.days_listed.is_some());
     for listing in listings {
         let label = match listing.band {
             Some(band) => style.band(band, &format!("{:<8}", band.name())),
@@ -661,11 +664,16 @@ fn print_listing_rows(listings: &[ListingSummary], currency: &str, style: Style)
         } else {
             String::new()
         };
+        let waiting = match listing.days_listed.filter(|_| aged) {
+            Some(count) => format!("  {:>10}", days(count)),
+            None if aged => format!("  {:>10}", ""),
+            None => String::new(),
+        };
         println!(
-            "  {:>11}  {label}  {:<14} {}",
+            "  {:>11}  {label}  {:<14} {}{waiting}",
             price(listing.price, currency),
             truncate(&listing.condition, 14),
-            truncate(&listing.title, if delivered { 26 } else { 44 })
+            truncate(&listing.title, if delivered { 26 } else { 32 })
         );
         if delivered {
             println!("  {:>11}            {landed}", "");

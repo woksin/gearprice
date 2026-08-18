@@ -15,9 +15,16 @@ All notable changes to this project are documented here. The format follows
   because a twelve-year median describes a market nobody is buying in.
 - Sold medians per condition grade, which order correctly where asking prices did not.
 - `--sold-sample` and `--no-sold`. `track` records sold medians alongside asking.
+- Per-listing time on the market, shown where a market is too thin for a per-band median.
+- A warning when a market is too small for percentile bands to mean anything.
+- A warning when Reverb's year field holds the model number rather than a year.
 
 ### Fixed
 
+- Years are read from listing titles rather than trusting Reverb's year field, which on
+  some models holds the model designation (Marshall's guitar Major is Model 1967 and was
+  built from 1968) and on others holds the production range (`1968 - 1974`). Both dated
+  every example of a model to the same wrong year.
 - Corrected the claim that sold prices are unobtainable. Reverb's Price Guide endpoint is
   retired, but sold history is public at `/api/comparison_shopping_pages/{id}/transactions`
   and returns both the asking price and the final price for each sale. Asking prices run

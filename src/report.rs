@@ -393,6 +393,10 @@ pub struct ListingSummary {
     pub title: String,
     pub shop: String,
     pub year: String,
+    /// How long this one has been on the market. Shown per listing where a market is too
+    /// thin for a per-band median to mean anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days_listed: Option<i64>,
     /// Auctions carry a current bid rather than an asking price.
     pub auction: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -407,6 +411,8 @@ impl ListingSummary {
         currency: &str,
         bands: Option<&Bands>,
         destination: Option<&[String]>,
+        model_title: &str,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         let cost = destination.map(|chain| crate::shipping::cost(listing, chain));
         Self {
@@ -421,7 +427,12 @@ impl ListingSummary {
             condition: listing.condition.display_name.clone(),
             title: listing.describe(),
             shop: listing.shop_name.clone(),
-            year: listing.year.clone(),
+            // Not Reverb's year field taken at face value: on some models it holds the
+            // model number, and sellers paste production ranges into titles.
+            year: crate::years::stated(&listing.title, &listing.year, model_title)
+                .map(|(year, _)| year.to_string())
+                .unwrap_or_default(),
+            days_listed: listing.days_listed(now),
             auction: listing.auction,
             band: bands.map(|bands| bands.band_for(listing.amount())),
             url: listing.web_url().map(str::to_string),

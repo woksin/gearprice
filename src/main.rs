@@ -17,6 +17,7 @@ mod shipping;
 mod sold;
 mod taxonomy;
 mod update;
+mod years;
 
 use std::time::Duration;
 
@@ -513,11 +514,33 @@ fn run_price(
             shipping::landed(listing, chain).unwrap_or_else(|| listing.amount())
         });
     }
-    let listings = shown
+    let model_title = model
+        .as_ref()
+        .map(|model| model.title.as_str())
+        .unwrap_or_default();
+    let now = Utc::now();
+    let listings: Vec<ListingSummary> = shown
         .into_iter()
         .take(arguments.listings)
-        .map(|listing| ListingSummary::of(listing, &market.currency, bands.as_ref(), chain))
+        .map(|listing| {
+            ListingSummary::of(
+                listing,
+                &market.currency,
+                bands.as_ref(),
+                chain,
+                model_title,
+                now,
+            )
+        })
         .collect();
+
+    // Said before the tables rather than left for the reader to work out.
+    if let Some(caution) = thin_market(&market, &search) {
+        warnings.push(caution);
+    }
+    if let Some(caution) = year_field_caution(model.as_ref(), &market) {
+        warnings.push(caution);
+    }
 
     let report = PriceReport {
         query: if words.is_empty() {
@@ -596,6 +619,57 @@ fn resolve_model(
         ));
     }
     Ok(resolution)
+}
+
+/// Warns when a market is too small for five percentile bands to mean anything.
+///
+/// Six listings do not have a ninetieth percentile. Printing five bands over them looks
+/// exactly like printing five bands over six hundred, and a reader has no way to tell.
+fn thin_market(market: &Market, search: &Search) -> Option<String> {
+    const ENOUGH: u32 = 12;
+    (market.total > 0 && market.total < ENOUGH).then(|| {
+        format!(
+            "only {} {} listings — the bands below are arithmetic on {} numbers rather than \
+             a distribution, so read the listings themselves",
+            market.total, search.condition, market.total
+        )
+    })
+}
+
+/// Warns when Reverb's year field on this model holds the model number.
+///
+/// Marshall's guitar Major is Model 1967 and was built from 1968; every listing reports
+/// its year as 1967. Anyone filtering by year on this model gets a confident wrong answer,
+/// and this tool did until it was caught.
+fn year_field_caution(model: Option<&CatalogueModel>, market: &Market) -> Option<String> {
+    let model = model?;
+    let designations = years::model_numbers(&model.title);
+    if designations.is_empty() {
+        return None;
+    }
+    let confused = market
+        .sample
+        .iter()
+        .filter(|listing| {
+            listing
+                .year
+                .trim()
+                .parse::<u32>()
+                .is_ok_and(|year| designations.contains(&year))
+        })
+        .count();
+    (confused > 0).then(|| {
+        format!(
+            "Reverb reports the year on {confused} of these listings as {}, which is this \
+             model's designation rather than a year — --year-min and --year-max are \
+             unreliable here, and the years shown come from the titles",
+            designations
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(" or ")
+        )
+    })
 }
 
 /// Places a model's median against its category.
@@ -781,7 +855,17 @@ fn run_listings(
         listings: listings
             .iter()
             .map(|listing| {
-                ListingSummary::of(listing, &market.currency, bands.as_ref(), chain.as_deref())
+                ListingSummary::of(
+                    listing,
+                    &market.currency,
+                    bands.as_ref(),
+                    chain.as_deref(),
+                    model
+                        .as_ref()
+                        .map(|model| model.title.as_str())
+                        .unwrap_or_default(),
+                    Utc::now(),
+                )
             })
             .collect(),
         diagnostics: Diagnostics::from(client.usage(), warnings),

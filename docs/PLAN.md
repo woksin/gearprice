@@ -169,7 +169,8 @@ Each of these came from a real error made during the Marshall Major session:
   something.
 - **Flag a listing whose title disagrees with the model it is pinned to.** A listing
   titled `Vintage 1968 Marshall Plexi Amplifier Head` sits in the Major catalogue entry.
-  It may be right; the reader should be told to look.
+  It may be right; the reader should be told to look. *(Still to do — the rest of this
+  section is built.)*
 
 ---
 
@@ -188,7 +189,10 @@ non-interactive stdout keep the current behaviour so scripts and pipes are unaff
    Done. One thing the plan did not anticipate: a long record needs its recent median
    quoted beside the overall one, or a twelve-year median gets read as today's price.
    `track` records sold medians too. `classes` remains on asking prices as planned.
-3. Mistake-proofing — small, independent, and each item is already specified above.
+3. ~~Mistake-proofing.~~ Done, except the title/model mismatch flag. Year handling moved
+   into `src/years.rs`; the year *field* turned out to carry production ranges too, not
+   only model numbers. Writing it also surfaced a char-boundary panic that would have hit
+   any title containing an em dash or an accent.
 4. Recall widening.
 5. `variants`.
 6. Interactive picking.
