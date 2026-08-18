@@ -322,7 +322,14 @@ pub fn measure(client: &Client, search: &Search) -> Result<Market> {
 /// Measures the market for `search` at the given percentiles.
 pub fn measure_at(client: &Client, search: &Search, percentiles: &[f64]) -> Result<Market> {
     let currency = client.currency().to_string();
-    let total = client.count(search)?;
+    // Both ends of the market at once, which also settles how many there are: a listing
+    // page reports the total for its search, so counting separately would be a third
+    // round trip for a number already in hand.
+    let ends = crate::parallel::each(&[Sort::PriceAscending, Sort::PriceDescending], |sort| {
+        edge_listing(client, search, *sort)
+    })?;
+    let (cheapest, total) = ends[0].clone();
+    let dearest = ends[1].0.clone();
 
     if total == 0 {
         return Ok(Market {
@@ -348,7 +355,15 @@ pub fn measure_at(client: &Client, search: &Search, percentiles: &[f64]) -> Resu
     if total <= ENUMERATION_LIMIT {
         enumerate(client, search, total, currency, percentiles)
     } else {
-        count(client, search, total, currency, percentiles)
+        count(
+            client,
+            search,
+            total,
+            currency,
+            percentiles,
+            cheapest,
+            dearest,
+        )
     }
 }
 
@@ -420,22 +435,16 @@ fn enumerate(
 }
 
 /// Measures the distribution by counting, for markets past the paging cap.
+#[allow(clippy::too_many_arguments)]
 fn count(
     client: &Client,
     search: &Search,
     total: u32,
     currency: String,
     wanted: &[f64],
+    cheapest: Option<Listing>,
+    dearest: Option<Listing>,
 ) -> Result<Market> {
-    // The bracket comes from the market itself: one listing from each end, which is both
-    // exact and two requests. Searching for the bounds would cost far more. Both ends are
-    // asked for at once — on a large category each of these takes Reverb a second and a
-    // half, and there is no reason to wait through them one after the other.
-    let ends = crate::parallel::each(&[Sort::PriceAscending, Sort::PriceDescending], |sort| {
-        edge_listing(client, search, *sort)
-    })?;
-    let cheapest = ends[0].clone();
-    let dearest = ends[1].clone();
     let low = cheapest
         .as_ref()
         .map(Listing::amount)
@@ -569,12 +578,19 @@ fn sample_windows(low: Money, high: Money, edges: &[Money]) -> Vec<(Money, Money
     cuts.windows(2).map(|pair| (pair[0], pair[1])).collect()
 }
 
-fn edge_listing(client: &Client, search: &Search, sort: Sort) -> Result<Option<Listing>> {
+/// One listing from one end of a market, and how many there are altogether.
+///
+/// The count comes back with the listing rather than being asked for separately. Every
+/// listing page carries the total for its search, so a count is a page of one that throws
+/// the listing away — and on a large category that discarded request is a serial round
+/// trip of well over a second, taken before anything else can start.
+fn edge_listing(client: &Client, search: &Search, sort: Sort) -> Result<(Option<Listing>, u32)> {
     let ordered = Search {
         sort,
         ..search.clone()
     };
-    Ok(client.listings(&ordered, 1, 1)?.listings.into_iter().next())
+    let page = client.listings(&ordered, 1, 1)?;
+    Ok((page.listings.into_iter().next(), page.total))
 }
 
 /// The value at the nearest-rank position of `fraction`, matching how the counting path

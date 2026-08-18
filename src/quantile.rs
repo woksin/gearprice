@@ -147,7 +147,6 @@ struct Curve {
     settled: Condvar,
 }
 
-#[derive(Default)]
 struct Known {
     /// Price to the number of listings at or below it.
     counts: BTreeMap<MajorUnits, u32>,
@@ -191,6 +190,8 @@ impl Curve {
         known.claimed.insert(price);
         drop(known);
 
+        // The answer has to land in the curve before the claim is given back, or a waiter
+        // could wake to find neither and buy the second copy this exists to prevent.
         let claim = Claim { curve: self, price };
         let count = ask(price)?;
         self.locked().counts.insert(price, count);
@@ -252,6 +253,13 @@ pub fn sketch(
     // request count runs about three quarters higher for no better answer. Log spacing
     // rather than even, because prices span orders of magnitude and even steps would put
     // every rung in the expensive tail.
+    //
+    // Making it finer does not help, which is worth recording because it looks like it
+    // should: more rungs cost nothing in round trips, so they ought to be free depth. A
+    // sixteen-rung ladder was measured against this one on `classes electric-guitars` and
+    // came out slower over four cold runs — eight more requests, and no round trip saved,
+    // because a tighter starting bracket still leaves the same handful of quarterings
+    // between it and the last few units.
     let rungs: Vec<MajorUnits> = (1..LADDER_STEPS)
         .map(|step| logarithmic_step(low, high, step, LADDER_STEPS))
         .filter(|price| *price > low && *price < high)
