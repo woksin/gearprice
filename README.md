@@ -142,68 +142,6 @@ page of service notes. Those land in the cheap end and turn "steal" into "not th
 you were looking for". Pinning to the catalogue model searches the products Reverb has
 identified as that piece of gear. Use `--raw` if you genuinely want the text search.
 
----
-
-## Typing it wrong
-
-Nobody types catalogue titles. Reverb's own search does not cope: `gibsen les pual
-standrd` returns **nothing at all**, and neither does `strat am pro ii`.
-
-```console
-$ gearprice price "gibsen les pual standrd"
-```
-
-```
-GEARPRICE  Gibson Les Paul Standard '60s (2019 - Present)
-════════════════════════════════════════════════════════════════════════════════════════════
-  Model                 Gibson · electric-guitars
-  Market                174 used listings · USD · asking prices, not sold prices
-  Read as               gibson les paul standard (you typed “gibsen les pual standrd”)
-
-  Close matches         these fit what you typed about as well — price one with --model-id
-                        Gibson Les Paul Standard '50s (2019 - Prese… --model-id 104711    183 used
-                        Gibson Les Paul Standard 1990 - 2001         --model-id 97323     135 used
-```
-
-It gets there in three steps, paying only for the ones it needs.
-
-**1. Search what you typed.** If that comes back confident, nothing else happens.
-
-**2. Otherwise, fix the spelling** against Reverb's own vocabulary — every brand and model
-name in its catalogue, 2,794 and 12,764 of them, fetched once and cached. No word list is
-hardcoded here, so it cannot rot as the catalogue grows.
-
-Three things make the corrections land:
-
-- *Transpositions count as one edit.* `pual` is a transposition of `paul` but two
-  substitutions from it, so plain Levenshtein quietly prefers `dual`.
-- *Frequency breaks ties.* Where two words are equally close, the one Reverb uses more
-  wins — which is also what stops `tubescreamer` becoming `tubedreamer`, a fuzz pedal
-  listed exactly three times, instead of `tube screamer`.
-- *Run-together words come apart*, but only when no real word explains them: `standrd` is
-  a misspelling of `standard`, not a request for `stand rd`.
-
-**3. Rank what came back** on how much of your query the title accounts for, how much of
-the title you did not ask for, and how much of that model is actually on the market. Model
-codes match through punctuation, so `ds1` finds `DS-1` and `d28` finds `D-28`.
-
-All of which is why these land where they should:
-
-| You type | You get |
-|---|---|
-| `ephiphone sheraton` | Epiphone Sheraton (2023 - Present) |
-| `gretch white falken` | Gretsch G7593 White Falcon I 2003 - 2012 |
-| `musicman stingrey` | Music Man StingRay |
-| `peavy 6505` | Peavey 6505 MH "Mini Head" |
-| `martin d28` | Martin D-28 |
-| `jazz bass amercan pro` | Fender American Professional II Jazz Bass |
-
-**When it is a close call, it says so.** `epiphone casino` is not one guitar — the 2023
-model is a $650 guitar and the USA Casino is a $2,700 one. gearprice prices the likeliest,
-lists the ones that fit about as well with the `--model-id` to price them instead, and
-never pretends a coin toss was a conclusion. And when the best match is a poor one, it
-says that too, rather than dressing a bass gig bag up as the answer.
-
 ### `--ships-to` — what you can actually buy, delivered
 
 An asking price is not what a guitar costs you. A $1,750 listing from Tokyo with $656 of
@@ -320,6 +258,68 @@ median in kroner beside one in dollars is not a price movement.
 Slugs for `--category` and for `gearprice classes`. Either a top-level slug
 (`electric-guitars`) or a subcategory (`solid-body`, or `electric-guitars/solid-body` when
 a name appears under more than one parent).
+
+---
+
+## Typing it wrong
+
+Nobody types catalogue titles. Reverb's own search does not cope: `gibsen les pual
+standrd` returns **nothing at all**, and neither does `strat am pro ii`.
+
+```console
+$ gearprice price "gibsen les pual standrd"
+```
+
+```
+GEARPRICE  Gibson Les Paul Standard '60s (2019 - Present)
+════════════════════════════════════════════════════════════════════════════════════════════
+  Model                 Gibson · electric-guitars
+  Market                174 used listings · USD · asking prices, not sold prices
+  Read as               gibson les paul standard (you typed “gibsen les pual standrd”)
+
+  Close matches         these fit what you typed about as well — price one with --model-id
+                        Gibson Les Paul Standard '50s (2019 - Prese… --model-id 104711    183 used
+                        Gibson Les Paul Standard 1990 - 2001         --model-id 97323     135 used
+```
+
+It gets there in three steps, paying only for the ones it needs.
+
+**1. Search what you typed.** If that comes back confident, nothing else happens.
+
+**2. Otherwise, fix the spelling** against Reverb's own vocabulary — every brand and model
+name in its catalogue, 2,794 and 12,764 of them, fetched once and cached. No word list is
+hardcoded here, so it cannot rot as the catalogue grows.
+
+Three things make the corrections land:
+
+- *Transpositions count as one edit.* `pual` is a transposition of `paul` but two
+  substitutions from it, so plain Levenshtein quietly prefers `dual`.
+- *Frequency breaks ties.* Where two words are equally close, the one Reverb uses more
+  wins — which is also what stops `tubescreamer` becoming `tubedreamer`, a fuzz pedal
+  listed exactly three times, instead of `tube screamer`.
+- *Run-together words come apart*, but only when no real word explains them: `standrd` is
+  a misspelling of `standard`, not a request for `stand rd`.
+
+**3. Rank what came back** on how much of your query the title accounts for, how much of
+the title you did not ask for, and how much of that model is actually on the market. Model
+codes match through punctuation, so `ds1` finds `DS-1` and `d28` finds `D-28`.
+
+All of which is why these land where they should:
+
+| You type | You get |
+|---|---|
+| `ephiphone sheraton` | Epiphone Sheraton (2023 - Present) |
+| `gretch white falken` | Gretsch G7593 White Falcon I 2003 - 2012 |
+| `musicman stingrey` | Music Man StingRay |
+| `peavy 6505` | Peavey 6505 MH "Mini Head" |
+| `martin d28` | Martin D-28 |
+| `jazz bass amercan pro` | Fender American Professional II Jazz Bass |
+
+**When it is a close call, it says so.** `epiphone casino` is not one guitar — the 2023
+model is a $650 guitar and the USA Casino is a $2,700 one. gearprice prices the likeliest,
+lists the ones that fit about as well with the `--model-id` to price them instead, and
+never pretends a coin toss was a conclusion. And when the best match is a poor one, it
+says that too, rather than dressing a bass gig bag up as the answer.
 
 ---
 
