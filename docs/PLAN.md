@@ -182,6 +182,13 @@ non-interactive stdout keep the current behaviour so scripts and pipes are unaff
 
 ---
 
+## Added since, not in the original plan
+
+- `gearprice deal <url>` — paste a Reverb listing address and get a verdict on that one
+  listing, including the offer that would be the usual discount off its asking price. A
+  listing carries a `comparison_shopping` link to its catalogue model, which is what makes
+  it possible. `price` accepts addresses too.
+
 ## Order of work
 
 1. ~~**Correct the false claim** in `README.md`, `SECURITY.md` and `report::SOURCE`.~~ Done.
@@ -193,7 +200,10 @@ non-interactive stdout keep the current behaviour so scripts and pipes are unaff
    into `src/years.rs`; the year *field* turned out to carry production ranges too, not
    only model numbers. Writing it also surfaced a char-boundary panic that would have hit
    any title containing an em dash or an accent.
-4. Recall widening.
+4. ~~Recall widening.~~ Done. Two guards were needed that the plan did not foresee: the
+   widening query has to be the model's *signature* (`Marshall Major`) rather than its
+   catalogue title, which no seller writes; and inclusion has to require words to be
+   actually present rather than prefix-matched, or `G-Major2` joins the Major's market.
 5. `variants`.
 6. Interactive picking.
 

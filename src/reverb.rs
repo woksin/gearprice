@@ -258,6 +258,19 @@ impl Client {
         self.get_json(&format!("{}/autocomplete", api_root()))
     }
 
+    /// One listing, by its Reverb id.
+    pub fn listing(&self, id: u64) -> Result<Listing> {
+        self.get_json(&format!("{}/listings/{id}", api_root()))
+    }
+
+    /// One catalogue model by its web slug, as it appears in a `reverb.com/p/...` URL.
+    pub fn model_by_slug(&self, slug: &str) -> Result<CatalogueModel> {
+        self.get_json(&url(
+            &format!("{}/comparison_shopping_pages/find", api_root()),
+            &[("slug".to_string(), slug.to_string())],
+        ))
+    }
+
     /// One page of a model's sold history, newest first.
     ///
     /// This is the endpoint the retired Price Guide's data moved to. It is public, needs
@@ -446,6 +459,17 @@ impl Listing {
         format!("{} {}", self.make, self.model).trim().to_string()
     }
 
+    /// The catalogue model id this listing belongs to, read out of its own links.
+    pub fn model_id(&self) -> Option<u64> {
+        let href = &self.links.comparison_shopping.as_ref()?.href;
+        href.rsplit('/')
+            .find(|part| !part.is_empty())?
+            .split(['?', '#'])
+            .next()?
+            .parse()
+            .ok()
+    }
+
     pub fn web_url(&self) -> Option<&str> {
         self.links.web.as_ref().map(|link| link.href.as_str())
     }
@@ -502,6 +526,10 @@ pub struct ShippingRegion {
 pub struct ListingLinks {
     #[serde(default)]
     pub web: Option<Link>,
+    /// The catalogue model this listing was matched to, which is what lets a pasted URL
+    /// be priced against what that model sells for.
+    #[serde(default)]
+    pub comparison_shopping: Option<Link>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -709,6 +737,26 @@ mod tests {
         let model: CatalogueModel =
             serde_json::from_str(r#"{"id": 1, "slug": "x", "title": "X"}"#).unwrap();
         assert!(model.product_ids().is_empty());
+    }
+
+    #[test]
+    fn a_listing_knows_which_catalogue_model_it_belongs_to() {
+        let listing: Listing = serde_json::from_str(
+            r#"{"id":1,"condition":{"slug":"good","display_name":"Good"},
+                "price":{"amount_cents":100},
+                "_links":{"comparison_shopping":{"href":
+                    "https://api.reverb.com/api/comparison_shopping_pages/137981"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(Some(137_981), listing.model_id());
+
+        // A listing Reverb never matched to a model has none, which is not an error.
+        let loose: Listing = serde_json::from_str(
+            r#"{"id":1,"condition":{"slug":"good","display_name":"Good"},
+                "price":{"amount_cents":100}}"#,
+        )
+        .unwrap();
+        assert_eq!(None, loose.model_id());
     }
 
     #[test]

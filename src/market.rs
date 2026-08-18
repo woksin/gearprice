@@ -266,6 +266,55 @@ fn observe(listings: &[Listing], now: DateTime<Utc>) -> Vec<Observation> {
         .collect()
 }
 
+/// Below this many listings, a pinned search is thin enough to be worth widening.
+///
+/// Pinning to a catalogue model is right for common gear — a text search for `Boss DS-1`
+/// returns the pedal, a T-shirt, a knob set and a page of service notes, and the junk
+/// lands in the cheap band. It is wrong for rare gear, because sellers of rare things
+/// often do not attach their listing to the catalogue entry at all. Measured on a Marshall
+/// Major: the pin found six listings and a widened search found nine.
+pub const WIDEN_BELOW: u32 = 25;
+
+/// Builds a market from a set of listings already in hand.
+///
+/// Used when the listings came from more than one search and had to be merged, which the
+/// counting path cannot express as a single query.
+pub fn from_listings(listings: Vec<Listing>, currency: String, condition: Condition) -> Market {
+    let total = listings.len() as u32;
+    let mut prices: Vec<Money> = listings.iter().map(Listing::amount).collect();
+    prices.sort_unstable();
+    let percentiles: Vec<(f64, Money)> = REPORT_PERCENTILES
+        .iter()
+        .map(|fraction| (*fraction, nearest_rank(&prices, *fraction)))
+        .collect();
+    let mean = (!prices.is_empty()).then(|| {
+        let sum: i128 = prices.iter().map(|price| i128::from(price.minor)).sum();
+        Money::from_minor((sum / i128::from(total.max(1))) as i64)
+    });
+    let histogram = even_histogram(&prices, &percentiles);
+    let observations = observe(&listings, Utc::now());
+    let warnings = unfiltered_warning(&listings, condition)
+        .into_iter()
+        .collect();
+    let mut sample = listings;
+    sample.sort_by_key(Listing::amount);
+    Market {
+        low: prices.first().copied().unwrap_or(Money::ZERO),
+        high: prices.last().copied().unwrap_or(Money::ZERO),
+        grades: grade_prices(&sample),
+        currency,
+        total,
+        percentiles,
+        mean,
+        method: Method::Enumerated { listings: total },
+        observations,
+        observations_complete: true,
+        sample,
+        histogram,
+        warnings,
+    }
+}
+
 /// Measures the market for `search`, reporting the standard set of percentiles.
 pub fn measure(client: &Client, search: &Search) -> Result<Market> {
     measure_at(client, search, &REPORT_PERCENTILES)

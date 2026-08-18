@@ -529,6 +529,22 @@ pub struct ClassRow {
     pub description: String,
 }
 
+/// One listing, judged against what its model sells for.
+#[derive(Debug, Serialize)]
+pub struct DealReport {
+    pub source: &'static str,
+    pub generated_at: String,
+    pub currency: String,
+    pub model: ModelSummary,
+    pub listing: ListingSummary,
+    pub verdict: AskingVerdict,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sold: Option<SoldSummary>,
+    pub bands: BandTable,
+    pub market: MarketSummary,
+    pub diagnostics: Diagnostics,
+}
+
 /// What a market has done since it was first recorded.
 #[derive(Debug, Serialize)]
 pub struct TrackReport {

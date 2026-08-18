@@ -196,6 +196,104 @@ fn best_score(models: &[CatalogueModel], query: &[String]) -> f64 {
 // Scoring
 // ---------------------------------------------------------------------------
 
+/// The few words that actually identify a model, for widening a search and for testing
+/// whether a listing found that way is the same thing.
+///
+/// A catalogue title carries far more than a name — `Marshall JMP Model 1967 "Major"
+/// 200-Watt Guitar Amp Head 1968 - 1974` — and searching all of it finds nothing, because
+/// no seller writes that. What identifies this amp to a person is `Marshall Major`.
+///
+/// So the specifications come out: model numbers, production years, wattages, and the
+/// category words every amp head shares. What is left is the brand and the name.
+pub fn signature(title: &str, brand: &str) -> Vec<String> {
+    const GENERIC: [&str; 18] = [
+        "amp",
+        "amplifier",
+        "head",
+        "combo",
+        "guitar",
+        "bass",
+        "electric",
+        "acoustic",
+        "watt",
+        "watts",
+        "series",
+        "reissue",
+        "vintage",
+        "edition",
+        "model",
+        "the",
+        "with",
+        "and",
+    ];
+    let designations = crate::years::model_numbers(title);
+    let mut words: Vec<String> = Vec::new();
+    for word in tokenise(brand).into_iter().chain(tokenise(title)) {
+        let numeric = word.parse::<u32>().ok();
+        let is_designation = numeric.is_some_and(|number| designations.contains(&number));
+        let is_year = numeric.is_some_and(|number| (1900..=2099).contains(&number));
+        if GENERIC.contains(&word.as_str())
+            || is_designation
+            || is_year
+            || is_era_marker(&word)
+            // `200-watt` arrives as `200`; a bare number that is not a year is a spec.
+            || (numeric.is_some() && word.len() <= 4)
+        {
+            continue;
+        }
+        if !words.contains(&word) {
+            words.push(word);
+        }
+    }
+    words
+}
+
+/// Whether a listing title plausibly describes the model these words name.
+///
+/// Deliberately strict. This decides whether a listing a text search turned up belongs in
+/// a model's market, and letting a T-shirt in would put it at the bottom of the price
+/// range where it reads as the bargain of the century.
+pub fn describes(title: &str, model_words: &[String]) -> bool {
+    // Three quarters of the words, and each of them actually present. `Marshall Major IV
+    // Bluetooth Headphones` has two of three and would otherwise join a market of
+    // four-thousand dollar amplifiers at thirty-five dollars.
+    const ENOUGH: f64 = 0.75;
+    if model_words.is_empty() {
+        return false;
+    }
+    let words = tokenise(title);
+    let squashed: String = words.iter().map(|word| strip_punctuation(word)).collect();
+    // Era markers in the model's title are not something a seller has to repeat.
+    let asked: Vec<&String> = model_words
+        .iter()
+        .filter(|word| !is_era_marker(word))
+        .collect();
+    if asked.is_empty() {
+        return false;
+    }
+    let matched = asked
+        .iter()
+        .filter(|word| present(word, &words, &squashed))
+        .count();
+    matched as f64 / asked.len() as f64 >= ENOUGH
+}
+
+/// Whether a word is really in a title, as opposed to nearly in it.
+///
+/// No prefix credit and no near misses, which is what separates this from the scoring
+/// used to rank a search. `Marshall JMP-1 + tc electronic G-Major2` contains `marshall`
+/// and `jmp`, and `major2` is not `major` — it is a different pedal by a different maker,
+/// and prefix credit was letting it into the amplifier's market.
+fn present(word: &str, title: &[String], squashed: &str) -> bool {
+    let bare = strip_punctuation(word);
+    if is_model_code(&bare) && squashed.contains(&bare) {
+        return true;
+    }
+    title
+        .iter()
+        .any(|candidate| candidate == word || strip_punctuation(candidate) == bare)
+}
+
 /// How well a catalogue model answers a query, from 0 to 1.
 pub fn score(model: &CatalogueModel, query: &[String]) -> f64 {
     if query.is_empty() {
@@ -646,6 +744,47 @@ mod tests {
             "new_total": new,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_models_signature_is_the_name_a_person_would_use() {
+        // The catalogue calls it all of this; a seller calls it a Marshall Major.
+        assert_eq!(
+            vec!["marshall", "jmp", "major"],
+            signature(
+                "Marshall JMP Model 1967 \"Major\" 200-Watt Guitar Amp Head 1968 - 1974",
+                "Marshall"
+            )
+        );
+        assert_eq!(
+            vec!["gibson", "les", "paul", "standard", "60s"],
+            signature("Gibson Les Paul Standard '60s (2019 - Present)", "Gibson")
+        );
+    }
+
+    #[test]
+    fn a_widened_search_keeps_the_amp_and_drops_the_t_shirt() {
+        let major = signature(
+            "Marshall JMP Model 1967 \"Major\" 200-Watt Guitar Amp Head 1968 - 1974",
+            "Marshall",
+        );
+        // Real listings the catalogue entry did not carry.
+        assert!(describes(
+            "Marshall JMP Major Tube Guitar Amplifier Head 1971",
+            &major
+        ));
+        assert!(describes(
+            "1970 Marshall Major JMP Model 1967 200-Watt Amp Head",
+            &major
+        ));
+        // And the things a text search drags in with them.
+        assert!(!describes("Marshall Major IV Bluetooth Headphones", &major));
+        assert!(!describes(
+            "Marshall JMP-1 + tc electronic G-Major2",
+            &major
+        ));
+        assert!(!describes("Fender Twin Reverb", &major));
+        assert!(!describes("anything", &[]));
     }
 
     #[test]

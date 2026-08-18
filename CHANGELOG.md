@@ -15,6 +15,12 @@ All notable changes to this project are documented here. The format follows
   because a twelve-year median describes a market nobody is buying in.
 - Sold medians per condition grade, which order correctly where asking prices did not.
 - `--sold-sample` and `--no-sold`. `track` records sold medians alongside asking.
+- `gearprice deal <url>` — paste a Reverb listing address, or give a listing id, and get a
+  verdict on that listing against what the model actually sells for, with the offer that
+  would be the usual discount off its ask. `price` accepts addresses too.
+- Thin catalogue markets are widened with a text search, keeping only listings that
+  genuinely describe the same model, and saying how many the widening added.
+- `--strict` to refuse the widening.
 - Per-listing time on the market, shown where a market is too thin for a per-band median.
 - A warning when a market is too small for percentile bands to mean anything.
 - A warning when Reverb's year field holds the model number rather than a year.

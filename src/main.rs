@@ -15,6 +15,7 @@ mod resolve;
 mod reverb;
 mod shipping;
 mod sold;
+mod target;
 mod taxonomy;
 mod update;
 mod years;
@@ -33,9 +34,9 @@ use output::{Format, Style};
 use progress::Progress;
 use query::{Condition, Search, Sort};
 use report::{
-    AlternativeModel, AskingVerdict, BandTable, ClassReport, ClassRow, ClassSummary, Diagnostics,
-    ListingReport, ListingSummary, MarketSummary, ModelReport, ModelRow, ModelSummary, PriceReport,
-    Reading, SOURCE, SoldSummary, TrackReport, TrackedReport, TrackedSubject,
+    AlternativeModel, AskingVerdict, BandTable, ClassReport, ClassRow, ClassSummary, DealReport,
+    Diagnostics, ListingReport, ListingSummary, MarketSummary, ModelReport, ModelRow, ModelSummary,
+    PriceReport, Reading, SOURCE, SoldSummary, TrackReport, TrackedReport, TrackedSubject,
 };
 use reverb::{CatalogueModel, Client, DEFAULT_REQUEST_BUDGET, MAX_PER_PAGE};
 use shipping::Regions;
@@ -112,6 +113,8 @@ enum Command {
     Classes(ClassesArguments),
     /// Show Reverb's category tree, for --category
     Categories,
+    /// Judge one listing: paste its Reverb address, or give its id
+    Deal(Box<DealArguments>),
     /// Record what a market costs today, and show what it has done since
     Track(Box<TrackArguments>),
     /// Inspect or empty the response cache
@@ -121,7 +124,7 @@ enum Command {
 }
 
 /// Filters shared by every command that searches listings.
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 struct Filters {
     /// Which condition to price.
     #[arg(long, value_enum, default_value_t = Condition::Used)]
@@ -167,6 +170,10 @@ struct PriceArguments {
     /// Search the words given rather than resolving them to a catalogue model.
     #[arg(long)]
     raw: bool,
+
+    /// Never widen a thin catalogue market with a text search.
+    #[arg(long, conflicts_with = "raw")]
+    strict: bool,
 
     /// Skip the price class, which costs two extra requests.
     #[arg(long)]
@@ -238,6 +245,20 @@ struct ClassesArguments {
 }
 
 #[derive(Debug, Args)]
+struct DealArguments {
+    /// A reverb.com listing address, or a listing id.
+    #[arg(value_name = "LISTING")]
+    listing: String,
+
+    /// How many recent sales to read.
+    #[arg(long, default_value_t = sold::TARGET_SAMPLE, value_name = "N")]
+    sold_sample: u32,
+
+    #[command(flatten)]
+    filters: Filters,
+}
+
+#[derive(Debug, Args)]
 struct TrackArguments {
     /// The gear to record. Omit with --list to see everything already tracked.
     #[arg(value_name = "QUERY", num_args = 0..)]
@@ -301,6 +322,7 @@ fn run() -> Result<()> {
         Command::Models(arguments) => run_models(&cli, arguments, &client, &progress, style),
         Command::Listings(arguments) => run_listings(&cli, arguments, &client, &progress, style),
         Command::Classes(arguments) => run_classes(&cli, arguments, &client, &progress, style),
+        Command::Deal(arguments) => run_deal(&cli, arguments, &client, &progress, style),
         Command::Track(arguments) => run_track(&cli, arguments, &client, &progress, style),
         Command::Categories => run_categories(&cli, &client, &progress, style),
         Command::Cache(_) | Command::Update(_) => unreachable!("handled above"),
@@ -452,6 +474,30 @@ fn run_price(
         None => None,
     };
 
+    // A pinned market this thin is probably missing listings the seller never attached to
+    // the catalogue entry. Widen, and say what widening found.
+    let market = match model.as_ref().filter(|_| !arguments.strict) {
+        Some(model) if market.total < market::WIDEN_BELOW && !market.is_empty() => {
+            progress.set("Widening the search");
+            match widen(client, &search, &market, model, &arguments.filters) {
+                Ok(Some((wider, added))) => {
+                    warnings.push(format!(
+                        "the catalogue entry has {} listings; a wider search found {added} more \
+                         that no seller attached to it, and all {} are priced below",
+                        market.total, wider.total
+                    ));
+                    wider
+                }
+                Ok(None) => market,
+                Err(error) => {
+                    warnings.push(format!("could not widen the search ({error})"));
+                    market
+                }
+            }
+        }
+        _ => market,
+    };
+
     // Sold where there is enough of it, asking otherwise — and the report says which.
     let bands = sold
         .as_ref()
@@ -593,6 +639,33 @@ fn resolve_model(
     words: &str,
     warnings: &mut Vec<String>,
 ) -> Result<resolve::Resolution> {
+    // A pasted URL is not a search. Someone looking at a listing and asking about it has
+    // told us exactly which thing they mean, and guessing from its words would be worse.
+    match target::parse(words) {
+        target::Target::Listing(id) => {
+            let listing = client
+                .listing(id)
+                .with_context(|| format!("no Reverb listing with id {id}"))?;
+            let Some(model) = listing.model_id() else {
+                warnings.push(format!(
+                    "Reverb has not matched {:?} to a catalogue model, so this prices its \
+                     words rather than the model",
+                    listing.describe()
+                ));
+                return Ok(resolve::Resolution::none());
+            };
+            return Ok(resolve::Resolution::of(client.model(model)?));
+        }
+        target::Target::Model(id) => return Ok(resolve::Resolution::of(client.model(id)?)),
+        target::Target::ModelSlug(slug) => {
+            return Ok(resolve::Resolution::of(
+                client
+                    .model_by_slug(&slug)
+                    .with_context(|| format!("no catalogue model at reverb.com/p/{slug}"))?,
+            ));
+        }
+        target::Target::Words(_) => {}
+    }
     if let Some(id) = model_id {
         let model = client.model(id).with_context(|| {
             format!("no catalogue model has id {id} — find one with `gearprice models`")
@@ -619,6 +692,57 @@ fn resolve_model(
         ));
     }
     Ok(resolution)
+}
+
+/// Adds listings a text search finds that the catalogue entry does not carry.
+///
+/// Only the ones whose titles plausibly describe the same model are kept — a widened
+/// search for a Boss DS-1 also returns a T-shirt, and the whole reason for pinning in the
+/// first place was to keep that out of the cheap band.
+fn widen(
+    client: &Client,
+    pinned: &Search,
+    market: &Market,
+    model: &CatalogueModel,
+    filters: &Filters,
+) -> Result<Option<(Market, usize)>> {
+    // The name a seller would use, not the catalogue's full description of the thing.
+    let wanted = resolve::signature(&model.title, model.brand_name());
+    if wanted.is_empty() {
+        return Ok(None);
+    }
+    let mut text = Search::text(wanted.join(" "));
+    apply_filters(&mut text, filters, client)?;
+    text.ships_to = pinned.ships_to.clone();
+    let found = measure(client, &text)?;
+
+    let known: Vec<u64> = market.sample.iter().map(|listing| listing.id).collect();
+    // A second guard, on price. Word matching alone let a set of Bluetooth headphones into
+    // a market of four-thousand dollar amplifiers; nothing genuinely the same model is an
+    // order of magnitude from the middle of it.
+    let middle = market.median().map(|price| price.minor).unwrap_or_default();
+    let plausible = |listing: &reverb::Listing| {
+        middle == 0
+            || (listing.amount().minor * 8 >= middle && listing.amount().minor <= middle * 8)
+    };
+    let extra: Vec<reverb::Listing> = found
+        .sample
+        .iter()
+        .filter(|listing| !known.contains(&listing.id))
+        .filter(|listing| resolve::describes(&listing.describe(), &wanted))
+        .filter(|listing| plausible(listing))
+        .cloned()
+        .collect();
+    if extra.is_empty() {
+        return Ok(None);
+    }
+    let added = extra.len();
+    let mut merged = market.sample.clone();
+    merged.extend(extra);
+    Ok(Some((
+        market::from_listings(merged, market.currency.clone(), filters.condition),
+        added,
+    )))
 }
 
 /// Warns when a market is too small for five percentile bands to mean anything.
@@ -929,6 +1053,107 @@ fn run_classes(
         Format::Table => output::print_classes(&report, style),
         Format::Json => output::print_json(&report)?,
         Format::Csv => output::print_classes_csv(&report)?,
+    }
+    Ok(())
+}
+
+/// Judges one listing against what its model actually sells for.
+fn run_deal(
+    cli: &Cli,
+    arguments: &DealArguments,
+    client: &Client,
+    progress: &Progress,
+    style: Style,
+) -> Result<()> {
+    let id = match target::parse(&arguments.listing) {
+        target::Target::Listing(id) => id,
+        // A bare number is words everywhere else, because model names are full of them.
+        // Here the argument is a listing by definition, so a number is an id.
+        target::Target::Words(words) => words
+            .trim()
+            .parse()
+            .with_context(|| format!("{words:?} is not a Reverb listing address or id"))?,
+        _ => {
+            bail!("that is a model rather than a listing — `gearprice price` takes a model address")
+        }
+    };
+
+    progress.set("Fetching the listing");
+    let listing = client
+        .listing(id)
+        .with_context(|| format!("no Reverb listing with id {id}"))?;
+    let Some(model_id) = listing.model_id() else {
+        bail!(
+            "Reverb has not matched {:?} to a catalogue model, so there is nothing to \
+             compare it against. `gearprice price {:?}` will price the words instead.",
+            listing.describe(),
+            listing.describe()
+        )
+    };
+    let model = client.model(model_id)?;
+
+    progress.set("Reading what it has sold for");
+    let sold = sold::read(client, model_id, arguments.sold_sample)?;
+
+    let mut search = Search::products(model.product_ids());
+    let mut filters = arguments.filters.clone();
+    // Judged against its own condition where the record is thick enough to support it,
+    // because a mint example and a beaten one are not the same market.
+    filters.condition = Condition::Used;
+    apply_filters(&mut search, &filters, client)?;
+    progress.set("Measuring the market");
+    let market = measure(client, &search)?;
+
+    let mut warnings = Vec::new();
+    let bands = Bands::of_sold(&sold).or_else(|| Bands::of(&market));
+    if bands.is_none() {
+        bail!("nothing to compare this against — no sales on record and nothing listed");
+    }
+    if sold.is_empty() {
+        warnings.push(
+            "no sold record for this model, so this is judged against what other sellers \
+             are asking rather than what anyone paid"
+                .into(),
+        );
+    }
+    let bands = bands.expect("checked above");
+    let price = listing.amount();
+    let band = bands.band_for(price);
+    let against = match bands.basis {
+        classify::Basis::Sold => sold.median(),
+        classify::Basis::Asking => market.median(),
+    };
+
+    let report = DealReport {
+        listing: ListingSummary::of(
+            &listing,
+            market.currency.as_str(),
+            Some(&bands),
+            None,
+            &model.title,
+            Utc::now(),
+        ),
+        source: SOURCE,
+        generated_at: timestamp(),
+        currency: market.currency.clone(),
+        model: ModelSummary::of(&model),
+        verdict: AskingVerdict {
+            price: price.major(&market.currency),
+            band,
+            basis: bands.basis,
+            verdict: band.verdict(bands.basis).to_string(),
+            against_median: against
+                .map(|against| price.major(&market.currency) - against.major(&market.currency))
+                .unwrap_or_default(),
+        },
+        sold: (!sold.is_empty()).then(|| SoldSummary::of(&sold, &market)),
+        bands: BandTable::of(&bands, &market),
+        market: MarketSummary::of(&market),
+        diagnostics: Diagnostics::from(client.usage(), warnings),
+    };
+    match cli.format {
+        Format::Json => output::print_json(&report)?,
+        _ => output::print_deal(&report, style),
     }
     Ok(())
 }

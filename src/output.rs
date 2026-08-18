@@ -11,8 +11,8 @@ use anyhow::Result;
 use crate::classify::{Band, Basis, Segment};
 use crate::money::{self, Money};
 use crate::report::{
-    BandTable, ClassReport, ListingReport, ListingSummary, ModelReport, PriceReport, SOURCE_SHORT,
-    TrackReport, TrackedReport,
+    BandTable, ClassReport, DealReport, ListingReport, ListingSummary, ModelReport, PriceReport,
+    SOURCE_SHORT, TrackReport, TrackedReport,
 };
 
 const RULE_WIDTH: usize = 92;
@@ -747,6 +747,95 @@ fn print_usage(diagnostics: &crate::report::Diagnostics, style: Style) {
             diagnostics.requests, diagnostics.cache_hits
         ))
     );
+}
+
+/// One listing, judged. The answer goes first, because it is the only thing being asked.
+pub fn print_deal(report: &DealReport, style: Style) {
+    let currency = report.currency.as_str();
+    let verdict = &report.verdict;
+    println!(
+        "{}",
+        style.bold(&format!(
+            "GEARPRICE  {}",
+            truncate(&report.listing.title, 70)
+        ))
+    );
+    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    println!(
+        "  {:<21} {:>10}  {}",
+        "Asking",
+        price(verdict.price, currency),
+        style.band(verdict.band, &verdict.band.name().to_uppercase())
+    );
+    println!("  {:<21} {:>10}  {}", "", "", style.dim(&verdict.verdict));
+
+    if let Some(sold) = &report.sold {
+        let headline = sold.recent_median.or(sold.median);
+        if let Some(median) = headline {
+            let gap = verdict.price - median;
+            let direction = if gap < 0.0 { "below" } else { "above" };
+            let colour = if gap < 0.0 { "32" } else { "31" };
+            println!(
+                "  {:<21} {:>10}  {}",
+                if sold.recent_median.is_some() {
+                    "Sold, last year"
+                } else {
+                    "Sold"
+                },
+                price(median, currency),
+                style.paint(
+                    colour,
+                    &format!("this one is {} {direction}", price(gap.abs(), currency))
+                )
+            );
+        }
+        if let Some(discount) = sold.typical_discount {
+            println!(
+                "  {:<21} {:>10}  {}",
+                "Room",
+                format!("{:.0}%", discount * 100.0),
+                style.dim(&format!(
+                    "typical off the ask · {} of {} went at or above it",
+                    number(sold.sold_at_or_above_ask as u32),
+                    number(sold.sales_with_both_prices as u32)
+                ))
+            );
+            // The number somebody about to make an offer actually wants.
+            let target = verdict.price * (1.0 + discount);
+            println!(
+                "  {:<21} {:>10}  {}",
+                "An offer at",
+                price(target, currency),
+                style.dim("would be the usual discount off this asking price")
+            );
+        }
+    }
+    if let Some(waiting) = report.listing.days_listed {
+        println!(
+            "  {:<21} {:>10}  {}",
+            "Listed for",
+            days(waiting),
+            style.dim(if waiting > 90 {
+                "a long wait at this price"
+            } else {
+                ""
+            })
+        );
+    }
+    println!(
+        "  {:<21} {}",
+        "Model",
+        style.dim(&truncate(&report.model.title, 62))
+    );
+    print_warnings(&report.diagnostics, style);
+
+    println!();
+    print_bands(&report.bands, currency, style);
+    if let Some(url) = &report.listing.url {
+        println!();
+        println!("  {}", style.dim(url));
+    }
+    print_usage(&report.diagnostics, style);
 }
 
 pub fn print_track(report: &TrackReport, style: Style) {
