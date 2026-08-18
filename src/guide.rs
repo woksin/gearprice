@@ -169,8 +169,7 @@ pub fn write(out: &mut impl Write, colour: bool) -> io::Result<()> {
     writeln!(out, "{}", bold("Reading the numbers honestly"))?;
     writeln!(
         out,
-        "  · {}",
-        "Sold prices are completed Reverb sales. Private and shop sales"
+        "  · Sold prices are completed Reverb sales. Private and shop sales"
     )?;
     writeln!(
         out,
@@ -178,13 +177,11 @@ pub fn write(out: &mut impl Write, colour: bool) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "  · {}",
-        "Where nothing has sold, bands fall back to asking prices and say so."
+        "  · Where nothing has sold, bands fall back to asking prices and say so."
     )?;
     writeln!(
         out,
-        "  · {}",
-        "A market of six listings has no meaningful ninetieth percentile, and"
+        "  · A market of six listings has no meaningful ninetieth percentile, and"
     )?;
     writeln!(
         out,
@@ -192,8 +189,7 @@ pub fn write(out: &mut impl Write, colour: bool) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "  · {}",
-        "\"Listed for\" is the giveaway: what is priced right sells and leaves,"
+        "  · \"Listed for\" is the giveaway: what is priced right sells and leaves,"
     )?;
     writeln!(
         out,
