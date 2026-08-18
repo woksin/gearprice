@@ -15,7 +15,22 @@ use crate::report::{
     SOURCE_SHORT, TrackReport, TrackedReport, VariantReport,
 };
 
-const RULE_WIDTH: usize = 92;
+/// The width tables are drawn to.
+///
+/// Measured from the terminal rather than fixed. A fixed rule either wastes half a wide
+/// window or overflows a narrow one, and overflow is the worse of the two: a wrapped row
+/// destroys the column alignment that makes a table readable at all.
+///
+/// Bounded at both ends. Below the lower bound the columns cannot fit whatever is done,
+/// and above the upper one the eye loses the row on the way across.
+fn rule_width() -> usize {
+    const NARROWEST: usize = 60;
+    const WIDEST: usize = 110;
+    terminal_size::terminal_size()
+        .map(|(terminal_size::Width(columns), _)| usize::from(columns).saturating_sub(1))
+        .unwrap_or(92)
+        .clamp(NARROWEST, WIDEST)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 pub enum Format {
@@ -109,7 +124,7 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
         .map(|model| model.title.clone())
         .unwrap_or_else(|| report.query.clone());
     println!("{}", style.bold(&format!("GEARPRICE  {heading}")));
-    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    println!("{}", style.dim(&"═".repeat(rule_width())));
 
     if let Some(model) = &report.model {
         let mut parts = vec![model.brand.clone()];
@@ -222,7 +237,7 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
             println!(
                 "  {:<21} {:<36} {}",
                 "",
-                truncate(&other.title, 36),
+                fit(&other.title, 56),
                 style.dim(&format!(
                     "--model-id {:<9} {} used",
                     other.id,
@@ -381,7 +396,7 @@ fn print_bands(bands: &BandTable, currency: &str, style: Style) {
     } else {
         println!("  {:<9} {:>25} {:>7}  Meaning", "Band", "Range", "Share");
     }
-    println!("  {}", style.dim(&"─".repeat(RULE_WIDTH - 2)));
+    println!("  {}", style.dim(&"─".repeat(rule_width() - 2)));
     let coarse = coarse_column(
         bands
             .bands
@@ -411,7 +426,7 @@ fn print_bands(bands: &BandTable, currency: &str, style: Style) {
                 range,
                 format!("{:.0}%", row.share * 100.0),
                 row.days_listed.map(days).unwrap_or_else(|| "—".into()),
-                style.dim(&row.verdict)
+                style.dim(&fit(&row.verdict, 60))
             );
         } else {
             println!(
@@ -419,7 +434,7 @@ fn print_bands(bands: &BandTable, currency: &str, style: Style) {
                 style.band(band, &row.band),
                 range,
                 format!("{:.0}%", row.share * 100.0),
-                style.dim(&row.verdict)
+                style.dim(&fit(&row.verdict, 46))
             );
         }
     }
@@ -528,7 +543,7 @@ pub fn print_models(report: &ModelReport, style: Style) {
         "{}",
         style.bold(&format!("GEARPRICE  models matching “{}”", report.query))
     );
-    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    println!("{}", style.dim(&"═".repeat(rule_width())));
     if report.models.is_empty() {
         println!("  No catalogue model matches that. Try fewer words, or a different spelling.");
         print_usage(&report.diagnostics, style);
@@ -538,7 +553,7 @@ pub fn print_models(report: &ModelReport, style: Style) {
         "  {:<48} {:>6} {:>11} {:>6} {:>11}",
         "Model", "Used", "Used from", "New", "New from"
     );
-    println!("  {}", style.dim(&"─".repeat(RULE_WIDTH - 2)));
+    println!("  {}", style.dim(&"─".repeat(rule_width() - 2)));
     for model in &report.models {
         println!(
             "  {:<48} {:>6} {:>11} {:>6} {:>11}",
@@ -579,7 +594,7 @@ pub fn print_classes(report: &ClassReport, style: Style) {
         "{}",
         style.bold(&format!("GEARPRICE  price classes of {}", report.category))
     );
-    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    println!("{}", style.dim(&"═".repeat(rule_width())));
     println!(
         "  {:<21} {} {} listings · {} · {}",
         "Market",
@@ -592,7 +607,7 @@ pub fn print_classes(report: &ClassReport, style: Style) {
     print_warnings(&report.diagnostics, style);
     println!();
     println!("  {:<10} {:>27} {:>7}  Meaning", "Class", "Range", "Share");
-    println!("  {}", style.dim(&"─".repeat(RULE_WIDTH - 2)));
+    println!("  {}", style.dim(&"─".repeat(rule_width() - 2)));
     let coarse = coarse_column(report.classes.iter().flat_map(|row| [row.from, row.to]));
     for row in &report.classes {
         let range = price_range(row.from, row.to, currency, coarse);
@@ -613,7 +628,7 @@ pub fn print_listings(report: &ListingReport, style: Style) {
         "{}",
         style.bold(&format!("GEARPRICE  listings for “{}”", report.query))
     );
-    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    println!("{}", style.dim(&"═".repeat(rule_width())));
     println!(
         "  {:<21} {} of {} {} listings · {} · {}",
         "Showing",
@@ -679,7 +694,12 @@ fn print_listing_rows(listings: &[ListingSummary], currency: &str, style: Style)
             "  {:>11}  {label}  {:<14} {}{waiting}",
             price(listing.price, currency),
             truncate(&listing.condition, 14),
-            truncate(&listing.title, if delivered { 26 } else { 32 })
+            // Price, band label, condition and the age column all take fixed room; the
+            // title gets whatever is left.
+            fit(
+                &listing.title,
+                42 + usize::from(delivered) * 22 + usize::from(aged) * 12,
+            )
         );
         if delivered {
             println!("  {:>11}            {landed}", "");
@@ -709,7 +729,7 @@ fn print_warnings(diagnostics: &crate::report::Diagnostics, style: Style) {
     }
     println!();
     for warning in &diagnostics.warnings {
-        for (index, line) in wrap(warning, RULE_WIDTH - 6).into_iter().enumerate() {
+        for (index, line) in wrap(warning, rule_width() - 6).into_iter().enumerate() {
             let marker = if index == 0 {
                 style.paint("33;1", "!")
             } else {
@@ -761,13 +781,13 @@ pub fn print_variants(report: &VariantReport, style: Style) {
         "{}",
         style.bold(&format!("GEARPRICE  versions of “{}”", report.query))
     );
-    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    println!("{}", style.dim(&"═".repeat(rule_width())));
     print_warnings(&report.diagnostics, style);
     println!(
         "  {:<44} {:>6} {:>11} {:>11} {:>7}",
         "Version", "Used", "Asking from", "Sold", "Sales"
     );
-    println!("  {}", style.dim(&"─".repeat(RULE_WIDTH - 2)));
+    println!("  {}", style.dim(&"─".repeat(rule_width() - 2)));
     for variant in &report.variants {
         // The recent median where the record is long, since that is the one to act on.
         let sold = variant
@@ -861,7 +881,7 @@ pub fn print_deal(report: &DealReport, style: Style) {
             truncate(&report.listing.title, 70)
         ))
     );
-    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    println!("{}", style.dim(&"═".repeat(rule_width())));
     println!(
         "  {:<21} {:>10}  {}",
         "Asking",
@@ -947,7 +967,7 @@ pub fn print_track(report: &TrackReport, style: Style) {
         .map(|model| model.title.clone())
         .unwrap_or_else(|| report.query.clone());
     println!("{}", style.bold(&format!("GEARPRICE  {heading}")));
-    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    println!("{}", style.dim(&"═".repeat(rule_width())));
     println!(
         "  {:<21} {} · {} · {}",
         "Tracking",
@@ -1026,7 +1046,7 @@ pub fn print_track(report: &TrackReport, style: Style) {
 
 pub fn print_tracked(report: &TrackedReport, style: Style) {
     println!("{}", style.bold("GEARPRICE  what is being tracked"));
-    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    println!("{}", style.dim(&"═".repeat(rule_width())));
     if report.tracked.is_empty() {
         println!("  Nothing yet. `gearprice track \"<gear>\"` takes the first reading.");
         println!("  {}", style.dim(&report.history));
@@ -1036,7 +1056,7 @@ pub fn print_tracked(report: &TrackedReport, style: Style) {
         "  {:<44} {:>9} {:>9} {:>8} {:>12}",
         "Model", "Currency", "Condition", "Readings", "Last read"
     );
-    println!("  {}", style.dim(&"─".repeat(RULE_WIDTH - 2)));
+    println!("  {}", style.dim(&"─".repeat(rule_width() - 2)));
     for subject in &report.tracked {
         println!(
             "  {:<44} {:>9} {:>9} {:>8} {:>12}",
@@ -1335,6 +1355,14 @@ fn bar(value: u32, largest: u32, width: usize) -> String {
     "█".repeat(filled.min(width))
 }
 
+/// Truncates `text` to whatever room is left on a row after `used` characters.
+///
+/// The alternative is a wrapped line, which puts the next row's columns half a line out
+/// and makes the whole table unreadable rather than just the one cell.
+fn fit(text: &str, used: usize) -> String {
+    truncate(text, rule_width().saturating_sub(used).max(8))
+}
+
 fn truncate(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return value.to_string();
@@ -1358,6 +1386,23 @@ fn neutralize(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rule_stays_within_bounds_whatever_the_terminal_says() {
+        // Not measurable directly here — there is no terminal under a test harness — but
+        // the bounds are what keep a table readable at either extreme.
+        let width = rule_width();
+        assert!((60..=110).contains(&width), "rule width was {width}");
+        // And whatever it is, fitting text to it never returns something wider.
+        assert!(
+            fit("a very long listing title that would run past any rule", 40)
+                .chars()
+                .count()
+                <= width
+        );
+        // Even an absurd claim on the space leaves room for something.
+        assert!(!fit("something", 500).is_empty());
+    }
 
     #[test]
     fn truncation_keeps_the_width_and_marks_the_cut() {

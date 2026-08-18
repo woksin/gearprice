@@ -6,6 +6,7 @@ mod history;
 mod market;
 mod money;
 mod output;
+mod parallel;
 mod paths;
 mod progress;
 mod quantile;
@@ -25,7 +26,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
-use rayon::prelude::*;
 
 use classify::{Band, Bands, SEGMENT_PERCENTILES, place, segment_ladder};
 use history::{History, Movement, Snapshot, Subject};
@@ -391,6 +391,7 @@ fn run() -> Result<()> {
 
     let client = build_client(&cli)?;
     let mut progress = Progress::new(cli.no_progress || cli.format != Format::Table);
+    client.watch(progress.counter());
 
     let result = match &cli.command {
         Command::Price(arguments) => run_price(&cli, arguments, &client, &progress, style),
@@ -1169,10 +1170,9 @@ fn run_variants(
 
     progress.set("Reading what each has sold for");
     let currency = client.currency().to_string();
-    let sold: Vec<Option<sold::Sold>> = models
-        .par_iter()
-        .map(|model| sold::read(client, model.id, arguments.sold_sample).ok())
-        .collect();
+    let sold: Vec<Option<sold::Sold>> = parallel::each(&models, |model| {
+        Ok(sold::read(client, model.id, arguments.sold_sample).ok())
+    })?;
 
     let variants: Vec<VariantRow> = models
         .iter()

@@ -41,6 +41,12 @@ pub const MAX_PAGES: u32 = 50;
 /// The most listings any one search can enumerate.
 pub const MAX_ENUMERABLE: u32 = MAX_PER_PAGE * MAX_PAGES;
 
+/// How many requests may be in flight to Reverb at once.
+///
+/// Enough to stop the connection pool throttling the searches, and modest enough to stay
+/// a reasonable guest: the pacing below still keeps requests from leaving in a burst.
+const CONCURRENCY: usize = 12;
+
 const RETRY_ATTEMPTS: u32 = 4;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(400);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(8);
@@ -64,6 +70,9 @@ pub struct Client {
     requests: AtomicU32,
     cache_hits: AtomicU32,
     budget: u32,
+    began: Instant,
+    /// Bumped as requests go out, so a spinner can say how much work is happening.
+    watcher: Mutex<Option<std::sync::Arc<AtomicU32>>>,
 }
 
 impl Client {
@@ -71,6 +80,13 @@ impl Client {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(30)))
             .user_agent(user_agent())
+            // ureq pools three idle connections per host by default, which quietly caps
+            // how many of these can be in flight at once. Everything gearprice does goes
+            // to one host, and a count on a large category takes Reverb well over a
+            // second, so three at a time is the difference between a report arriving in
+            // ten seconds and in half a minute.
+            .max_idle_connections_per_host(CONCURRENCY)
+            .max_idle_connections(CONCURRENCY * 2)
             // Status codes are handled here rather than raised as errors, because a 429
             // is a wait instruction and a 404 is an answer — neither is a failure.
             .http_status_as_error(false)
@@ -84,7 +100,17 @@ impl Client {
             requests: AtomicU32::new(0),
             cache_hits: AtomicU32::new(0),
             budget,
+            began: Instant::now(),
+            watcher: Mutex::new(None),
         }
+    }
+
+    /// Reports request counts to `watcher` as they are sent.
+    pub fn watch(&self, watcher: std::sync::Arc<AtomicU32>) {
+        *self
+            .watcher
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(watcher);
     }
 
     pub fn currency(&self) -> &str {
@@ -137,6 +163,14 @@ impl Client {
                 ));
             }
             let used = self.requests.fetch_add(1, Ordering::Relaxed);
+            if let Some(watcher) = self
+                .watcher
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+            {
+                watcher.store(used + 1, Ordering::Relaxed);
+            }
             if used >= self.budget {
                 bail!(
                     "request budget of {} exhausted — narrow the search, or raise it with --request-budget",
@@ -145,7 +179,17 @@ impl Client {
             }
             self.pace();
 
-            match self.attempt(url) {
+            let started = Instant::now();
+            let outcome = self.attempt(url);
+            if std::env::var_os("GEARPRICE_TRACE").is_some() {
+                eprintln!(
+                    "TRACE {:.3} {:.3} {}",
+                    self.began.elapsed().as_secs_f64(),
+                    started.elapsed().as_secs_f64(),
+                    url.split('?').next().unwrap_or(url)
+                );
+            }
+            match outcome {
                 Ok(body) => {
                     if let Some(cache) = &self.cache {
                         // A cache that cannot be written is not a reason to fail a run

@@ -32,7 +32,6 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rayon::prelude::*;
 
 use crate::money::Money;
 use crate::quantile::{self, REPORT_PERCENTILES};
@@ -366,17 +365,15 @@ fn enumerate(
         ..search.clone()
     };
     let pages = total.div_ceil(MAX_PER_PAGE).min(quantile_page_cap());
-    let fetched: Vec<Listing> = (1..=pages)
-        .into_par_iter()
-        .map(|page| {
-            client
-                .listings(&ordered, page, MAX_PER_PAGE)
-                .map(|result| result.listings)
-        })
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+    let numbers: Vec<u32> = (1..=pages).collect();
+    let fetched: Vec<Listing> = crate::parallel::each(&numbers, |page| {
+        client
+            .listings(&ordered, *page, MAX_PER_PAGE)
+            .map(|result| result.listings)
+    })?
+    .into_iter()
+    .flatten()
+    .collect();
 
     let mut prices: Vec<Money> = fetched.iter().map(Listing::amount).collect();
     prices.sort_unstable();
@@ -431,9 +428,14 @@ fn count(
     wanted: &[f64],
 ) -> Result<Market> {
     // The bracket comes from the market itself: one listing from each end, which is both
-    // exact and two requests. Searching for the bounds would cost far more.
-    let cheapest = edge_listing(client, search, Sort::PriceAscending)?;
-    let dearest = edge_listing(client, search, Sort::PriceDescending)?;
+    // exact and two requests. Searching for the bounds would cost far more. Both ends are
+    // asked for at once — on a large category each of these takes Reverb a second and a
+    // half, and there is no reason to wait through them one after the other.
+    let ends = crate::parallel::each(&[Sort::PriceAscending, Sort::PriceDescending], |sort| {
+        edge_listing(client, search, *sort)
+    })?;
+    let cheapest = ends[0].clone();
+    let dearest = ends[1].clone();
     let low = cheapest
         .as_ref()
         .map(Listing::amount)
@@ -471,21 +473,18 @@ fn count(
         .map(|(_, price)| Money::from_major(*price as f64, &currency))
         .collect();
     let windows = sample_windows(low, high, &edges);
-    let sampled: Vec<Vec<Listing>> = windows
-        .par_iter()
-        .map(|(from, to)| {
-            client
-                .listings(
-                    &Search {
-                        sort: Sort::PriceAscending,
-                        ..search.between(Some(*from), Some(*to))
-                    },
-                    1,
-                    SAMPLE_SIZE,
-                )
-                .map(|page| page.listings)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let sampled: Vec<Vec<Listing>> = crate::parallel::each(&windows, |(from, to)| {
+        client
+            .listings(
+                &Search {
+                    sort: Sort::PriceAscending,
+                    ..search.between(Some(*from), Some(*to))
+                },
+                1,
+                SAMPLE_SIZE,
+            )
+            .map(|page| page.listings)
+    })?;
     let spread: Vec<Listing> = sampled.into_iter().flatten().collect();
     let observations = observe(&spread, Utc::now());
     let mut sample = spread;

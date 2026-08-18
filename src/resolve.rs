@@ -24,7 +24,6 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use rayon::prelude::*;
 
 use crate::reverb::{CatalogueModel, Client};
 
@@ -138,10 +137,9 @@ pub fn resolve(client: &Client, query: &str, limit: u32) -> Result<Resolution> {
                     .join(" ")
             })
             .collect();
-        let found: Vec<Vec<CatalogueModel>> = shorter
-            .par_iter()
-            .map(|query| client.models(query, limit).map(|page| page.models))
-            .collect::<Result<Vec<_>>>()?;
+        let found: Vec<Vec<CatalogueModel>> = crate::parallel::each(&shorter, |query| {
+            client.models(query, limit).map(|page| page.models)
+        })?;
         for models in found {
             merge(&mut pool, models);
         }

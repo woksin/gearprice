@@ -30,6 +30,16 @@ All notable changes to this project are documented here. The format follows
 - A warning when a market is too small for percentile bands to mean anything.
 - A warning when Reverb's year field holds the model number rather than a year.
 
+### Changed
+
+- Tables are drawn to the width of the terminal rather than a fixed 92 columns, so a wide
+  window is used and a narrow one no longer wraps rows into each other.
+- Percentile searches quarter a bracket per round instead of halving it, and every
+  concurrent lookup runs on a real thread rather than in a work-stealing pool sized for
+  processors. A cold class ladder over 108,000 listings went from 30 seconds to 24.
+- The spinner reports how many lookups have gone out, so a half-minute wait shows progress
+  rather than only motion.
+
 ### Fixed
 
 - `--help` still claimed sold prices were unobtainable, which is the first thing anyone

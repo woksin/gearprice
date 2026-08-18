@@ -23,7 +23,6 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use anyhow::Result;
-use rayon::prelude::*;
 
 /// Probes are taken at whole major units, the granularity Reverb's price bounds accept.
 pub type MajorUnits = i64;
@@ -31,6 +30,26 @@ pub type MajorUnits = i64;
 /// Rungs in the seeding ladder. Enough to split the range for every percentile, few
 /// enough to be one cheap parallel round trip.
 const LADDER_STEPS: u32 = 8;
+
+/// How many pieces to cut a wide bracket into per round.
+///
+/// A bisection halves the bracket per request, so its cost is a round trip per halving —
+/// and on a large category Reverb takes about a second and a half to answer a count. Three
+/// probes issued together quarter it instead, for the same wall clock as one.
+///
+/// Modelled against a hundred thousand listings: bisection needs 61 rounds across the four
+/// percentiles a class ladder wants, and quartering needs 29 for 40% more requests. Going
+/// wider keeps helping for a while — eight-way needs 19 — but the requests climb faster
+/// than the rounds fall, and they all land on somebody else's server.
+const WIDE_ARITY: MajorUnits = 4;
+
+/// Below this many units, a bracket is not worth spending three requests on.
+///
+/// Kept low on purpose. Tracing a class ladder showed the search spending most of its wall
+/// clock in the narrow phase — a wide bracket falls to sixty-four units in a handful of
+/// quartered rounds, and then crawls the rest one probe at a time. Those last rounds are
+/// where the time goes, so they are quartered too.
+const WIDE_ENOUGH: MajorUnits = 6;
 
 /// The percentiles every price report quotes, as fractions of the population.
 pub const REPORT_PERCENTILES: [f64; 7] = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95];
@@ -144,24 +163,18 @@ pub fn sketch(
         .map(|step| logarithmic_step(low, high, step, LADDER_STEPS))
         .filter(|price| *price > low && *price < high)
         .collect();
-    rungs
-        .par_iter()
-        .map(|price| {
-            let count = count_at_or_below(*price)?;
-            locked(&curve).insert(*price, count);
-            Ok(())
-        })
-        .collect::<Result<Vec<()>>>()?;
+    crate::parallel::each(&rungs, |price| {
+        let count = count_at_or_below(*price)?;
+        locked(&curve).insert(*price, count);
+        Ok(())
+    })?;
 
     // Each percentile then runs its own search, and every probe any of them takes lands
     // in the shared curve where the others can use it.
-    let mut quantiles: Vec<(f64, MajorUnits)> = wanted
-        .par_iter()
-        .map(|fraction| {
-            solve(count_at_or_below, &curve, total, low, high, *fraction)
-                .map(|price| (*fraction, price))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut quantiles: Vec<(f64, MajorUnits)> = crate::parallel::each(wanted, |fraction| {
+        solve(count_at_or_below, &curve, total, low, high, *fraction)
+            .map(|price| (*fraction, price))
+    })?;
     quantiles.sort_by(|left, right| left.0.total_cmp(&right.0));
 
     Ok(Sketch {
@@ -174,7 +187,7 @@ pub fn sketch(
 
 /// Finds one percentile, consulting and filling the shared curve as it goes.
 fn solve(
-    count_at_or_below: &impl Fn(MajorUnits) -> Result<u32>,
+    count_at_or_below: &(impl Fn(MajorUnits) -> Result<u32> + Sync),
     curve: &Mutex<BTreeMap<MajorUnits, u32>>,
     total: u32,
     low: MajorUnits,
@@ -214,28 +227,46 @@ fn solve(
     // listing carries — $2,003 for a model where two hundred sellers all ask $1,999 —
     // which reads as precision while being wrong about the market.
     //
-    // Interpolation, not plain bisection: the bracket comes with the counts at both ends,
-    // so the position of the rank between them predicts the price far better than the
-    // midpoint does. Every other step falls back to the midpoint, which keeps the
-    // logarithmic worst case when a distribution defeats the guess.
+    // A wide bracket is cut into quarters, all three cuts asked for at once, because the
+    // cost here is round trips rather than requests. Once it is narrow the search goes
+    // back to one probe at a time, interpolating: the bracket comes with the counts at
+    // both ends, so the position of the rank between them predicts the price far better
+    // than the midpoint does. Every other narrow step falls back to the midpoint, which
+    // keeps the logarithmic worst case when a distribution defeats the guess.
     let mut step = 0_u32;
     while at_or_above - below > 1 {
-        let (count_below, count_above) = {
-            let curve = locked(curve);
-            (
-                curve.get(&below).copied().unwrap_or(0),
-                curve.get(&at_or_above).copied().unwrap_or(total),
-            )
-        };
-        let middle = if step.is_multiple_of(2) {
-            interpolate(below, count_below, at_or_above, count_above, rank)
+        let width = at_or_above - below;
+        let cuts: Vec<MajorUnits> = if width > WIDE_ENOUGH {
+            (1..WIDE_ARITY)
+                .map(|piece| below + width * piece / WIDE_ARITY)
+                .filter(|cut| *cut > below && *cut < at_or_above)
+                .collect()
         } else {
-            below + (at_or_above - below) / 2
+            let (count_below, count_above) = {
+                let curve = locked(curve);
+                (
+                    curve.get(&below).copied().unwrap_or(0),
+                    curve.get(&at_or_above).copied().unwrap_or(total),
+                )
+            };
+            vec![if step.is_multiple_of(2) {
+                interpolate(below, count_below, at_or_above, count_above, rank)
+            } else {
+                below + width / 2
+            }]
         };
-        if probe(middle)? >= rank {
-            at_or_above = middle;
-        } else {
-            below = middle;
+        if cuts.is_empty() {
+            break;
+        }
+
+        let counted: Vec<(MajorUnits, u32)> =
+            crate::parallel::each(&cuts, |cut| probe(*cut).map(|count| (*cut, count)))?;
+        for (cut, count) in counted {
+            if count >= rank {
+                at_or_above = at_or_above.min(cut);
+            } else {
+                below = below.max(cut);
+            }
         }
         step += 1;
     }
@@ -378,9 +409,10 @@ mod tests {
         // Seven percentiles over 100,000 units of price range. A linear scan would be
         // hopeless; a per-percentile search without the shared ladder would be far worse.
         assert!(
-            probes <= 110,
-            "took {probes} probes — interpolating searches over a shared curve should settle \
-             seven percentiles across a 100,000-unit range without brute force"
+            probes <= 170,
+            "took {probes} probes — quartering a wide bracket then interpolating a narrow \
+             one should settle seven percentiles across a 100,000-unit range without \
+             brute force"
         );
     }
 
