@@ -258,6 +258,12 @@ impl Client {
         self.get_json(&format!("{}/autocomplete", api_root()))
     }
 
+    /// Reverb's shipping region tree: countries, the superregions they sit in, and the
+    /// everywhere-else catch-all.
+    pub fn shipping_regions(&self) -> Result<ShippingRegions> {
+        self.get_json(&format!("{}/shipping/regions", api_root()))
+    }
+
     /// Catalogue models matching `query`, most relevant first.
     pub fn models(&self, query: &str, per_page: u32) -> Result<ModelPage> {
         let parameters = vec![
@@ -398,6 +404,8 @@ pub struct Listing {
     /// rather than a price.
     #[serde(default)]
     pub offers_enabled: bool,
+    #[serde(default)]
+    pub shipping: Shipping,
     #[serde(rename = "_links", default)]
     pub links: ListingLinks,
 }
@@ -432,6 +440,40 @@ impl Listing {
         let days = (now - published).num_days();
         (days >= 0).then_some(days)
     }
+}
+
+/// What a seller charges to send an item where.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Shipping {
+    #[serde(default)]
+    pub rates: Vec<ShippingRate>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ShippingRate {
+    #[serde(default)]
+    pub region_code: String,
+    /// Absent when the seller has the carrier work it out at checkout, in which case the
+    /// cost is genuinely unknown until then.
+    #[serde(default)]
+    pub rate: Option<Price>,
+}
+
+/// Reverb's shipping regions, as a forest of superregions and the countries under them.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ShippingRegions {
+    #[serde(default)]
+    pub shipping_regions: Vec<ShippingRegion>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ShippingRegion {
+    #[serde(default)]
+    pub code: String,
+    #[serde(default, deserialize_with = "collapse")]
+    pub name: String,
+    #[serde(default)]
+    pub children: Vec<ShippingRegion>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

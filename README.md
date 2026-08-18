@@ -204,6 +204,35 @@ lists the ones that fit about as well with the `--model-id` to price them instea
 never pretends a coin toss was a conclusion. And when the best match is a poor one, it
 says that too, rather than dressing a bass gig bag up as the answer.
 
+### `--ships-to` — what you can actually buy, delivered
+
+An asking price is not what a guitar costs you. A $1,750 listing from Tokyo with $656 of
+postage is dearer than a $1,900 one an hour away — and a large part of any market will not
+ship to you at all.
+
+```bash
+gearprice price "Gibson Les Paul Standard 60s" --ships-to NO --currency NOK
+```
+
+```
+  Market                32 used listings · NOK · asking prices, not sold prices
+  Ships to              Norway (NO) · only sellers who send there, priced delivered
+
+Cheapest delivered
+   19,860 NOK  steal     Very Good      Gibson Les Paul Standard…
+                          21,350 NOK (+1,490 NOK post)
+```
+
+174 listings become 32. Of the 108,373 used electric guitars on Reverb, 31,028 ship to
+Norway — so for anyone outside the United States, the unfiltered market is mostly a
+market they cannot buy from.
+
+Reverb applies the filter itself, so it composes with the counting engine and narrows a
+market of any size. The postage comes from Reverb's own region tree: Norway resolves to
+the seller's Europe rate rather than falling through to the everywhere-else price, which
+on one listing is the difference between $120 and $362. Where a seller has the carrier
+price it at checkout, that is reported as unknown rather than as free.
+
 ### `gearprice classes` — what a price class means in money
 
 ```console
@@ -339,7 +368,8 @@ Available on `price` and `listings`.
 | `--category SLUG` | A slug from `gearprice categories`, or `root/leaf` |
 | `--make NAME` | One brand |
 | `--year-min`, `--year-max` | |
-| `--region CODE` | Country code, e.g. `US`, `GB`, `NO` |
+| `--region CODE` | Where the item is. Country code, e.g. `US`, `GB`, `NO` |
+| `--ships-to CODE` | Where it must ship to. Narrows the market to sellers who send there and prices it delivered. `GEARPRICE_SHIPS_TO` |
 
 The condition list is closed on purpose. Reverb ignores a filter value it does not
 recognise and answers `200` with the entire unfiltered set — ask it for `brand-new` and
@@ -358,6 +388,7 @@ reporting the wrong population.
 | Variable | |
 |---|---|
 | `GEARPRICE_CURRENCY` | Default display currency |
+| `GEARPRICE_SHIPS_TO` | Default shipping destination |
 | `GEARPRICE_CACHE_DIR` | Cache location. Defaults to `$XDG_CACHE_HOME/gearprice` or `~/.cache/gearprice` |
 | `GEARPRICE_CACHE_TTL` | Default cache lifetime in minutes |
 | `GEARPRICE_NO_PROGRESS` | Suppress the spinner |

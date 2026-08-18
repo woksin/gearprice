@@ -122,6 +122,14 @@ pub fn print_price(report: &PriceReport, style: Style) {
         currency,
         style.dim(SOURCE_SHORT)
     );
+    if let Some(destination) = &report.delivered_to {
+        println!(
+            "  {:<21} {} {}",
+            "Ships to",
+            destination,
+            style.dim("· only sellers who send there, priced delivered")
+        );
+    }
     println!("  {:<21} {}", "Method", style.dim(&report.market.method));
     if let Some(reading) = &report.interpreted_as {
         println!(
@@ -244,7 +252,14 @@ pub fn print_price(report: &PriceReport, style: Style) {
 
     if !report.listings.is_empty() {
         println!();
-        println!("{}", style.bold("Cheapest listings"));
+        println!(
+            "{}",
+            style.bold(if report.delivered_to.is_some() {
+                "Cheapest delivered"
+            } else {
+                "Cheapest listings"
+            })
+        );
         print_listing_rows(&report.listings, currency, style);
     }
 
@@ -485,6 +500,15 @@ pub fn print_listings(report: &ListingReport, style: Style) {
         style.dim(SOURCE_SHORT)
     );
     print_warnings(&report.diagnostics, style);
+    if let Some(destination) = &report.delivered_to {
+        println!(
+            "  {:<21} {} {}",
+            "Ships to",
+            destination,
+            style.dim("· only sellers who send there, priced delivered")
+        );
+    }
+    print_warnings(&report.diagnostics, style);
     if let Some(bands) = &report.bands {
         println!();
         print_bands(bands, currency, style);
@@ -499,17 +523,35 @@ fn print_listing_rows(listings: &[ListingSummary], currency: &str, style: Style)
         println!("  Nothing listed right now.");
         return;
     }
+    let delivered = listings.iter().any(|listing| listing.shipping.is_some());
     for listing in listings {
         let label = match listing.band {
             Some(band) => style.band(band, &format!("{:<8}", band.name())),
             None => " ".repeat(8),
         };
+        let landed = if delivered {
+            match (listing.delivered, listing.shipping) {
+                (Some(total), Some(carriage)) => format!(
+                    "{:>11} {}",
+                    price(total, currency),
+                    style.dim(&format!("(+{} post)", price(carriage, currency)))
+                ),
+                // Said rather than left blank: a seller who has the carrier price it at
+                // checkout has not told anyone what delivery costs.
+                _ => format!("{:>11} {}", "—", style.dim("(post at checkout)")),
+            }
+        } else {
+            String::new()
+        };
         println!(
             "  {:>11}  {label}  {:<14} {}",
             price(listing.price, currency),
             truncate(&listing.condition, 14),
-            truncate(&listing.title, 44)
+            truncate(&listing.title, if delivered { 26 } else { 44 })
         );
+        if delivered {
+            println!("  {:>11}            {landed}", "");
+        }
         if let Some(url) = &listing.url {
             let shop = if listing.shop.is_empty() {
                 String::new()

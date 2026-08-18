@@ -131,6 +131,9 @@ pub struct Search {
     pub year_min: Option<u32>,
     pub year_max: Option<u32>,
     pub region: Option<String>,
+    /// Only listings whose seller will send to this destination. Reverb applies it, so it
+    /// composes with counting and narrows a market of any size to the buyable part.
+    pub ships_to: Option<String>,
     pub price_min: Option<Money>,
     pub price_max: Option<Money>,
     pub sort: Sort,
@@ -205,6 +208,9 @@ impl Search {
         if let Some(region) = &self.region {
             push("item_region", region.clone());
         }
+        if let Some(destination) = &self.ships_to {
+            push("ships_to", destination.clone());
+        }
         // Reverb takes these bounds in whole major units and treats both ends as
         // inclusive. Rounding outwards keeps a window from clipping a listing that sits
         // exactly on the boundary.
@@ -245,6 +251,9 @@ impl Search {
         }
         if let Some(region) = &self.region {
             parts.push(format!("in {region}"));
+        }
+        if let Some(destination) = &self.ships_to {
+            parts.push(format!("shipping to {destination}"));
         }
         if parts.is_empty() {
             "the whole marketplace".to_string()
@@ -297,10 +306,25 @@ mod tests {
             .collect();
         assert_eq!(vec!["219711", "219712"], ids);
         assert!(parameters.contains(&("condition[]".into(), "used".into())));
+        // Not sent at all when no destination was asked for, since an empty value is one
+        // of the things Reverb ignores.
+        assert!(!parameters.iter().any(|(key, _)| key == "ships_to"));
         // Outwards: the floor below, the ceiling above, so a listing on the boundary survives.
         assert!(parameters.contains(&("price_min".into(), "1750".into())));
         assert!(parameters.contains(&("price_max".into(), "2451".into())));
         assert!(parameters.contains(&("sort".into(), "price|asc".into())));
+    }
+
+    #[test]
+    fn a_destination_becomes_a_filter_the_server_applies() {
+        let search = Search {
+            product_ids: vec![1],
+            ships_to: Some("NO".into()),
+            ..Search::default()
+        };
+        let parameters = search.parameters("USD", 1, 1);
+        assert!(parameters.contains(&("ships_to".into(), "NO".into())));
+        assert!(search.describe().contains("shipping to NO"));
     }
 
     #[test]

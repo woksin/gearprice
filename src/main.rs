@@ -12,6 +12,7 @@ mod query;
 mod report;
 mod resolve;
 mod reverb;
+mod shipping;
 mod taxonomy;
 mod update;
 
@@ -33,6 +34,7 @@ use report::{
     SOURCE,
 };
 use reverb::{CatalogueModel, Client, DEFAULT_REQUEST_BUDGET, MAX_PER_PAGE};
+use shipping::Regions;
 use taxonomy::{Selector, Taxonomy};
 
 const ABOUT: &str = "What guitar gear costs on Reverb right now, and what class it sits in";
@@ -136,6 +138,10 @@ struct Filters {
     /// Restrict to listings in one region, as a country code such as US or GB.
     #[arg(long, value_name = "CODE")]
     region: Option<String>,
+
+    /// Only listings whose seller ships to here, and price them delivered.
+    #[arg(long, env = "GEARPRICE_SHIPS_TO", value_name = "CODE")]
+    ships_to: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -299,6 +305,13 @@ fn apply_filters(
     search.year_min = filters.year_min;
     search.year_max = filters.year_max;
     search.region = filters.region.as_ref().map(|code| code.to_uppercase());
+    if let Some(destination) = &filters.ships_to {
+        // Checked against Reverb's own region tree first: an unknown destination is
+        // ignored by the server, which would silently widen the market back out.
+        let regions = Regions::load(client)?;
+        let code = regions.resolve(destination)?;
+        search.ships_to = Some(code);
+    }
     let Some(slug) = &filters.category else {
         return Ok(None);
     };
@@ -383,11 +396,32 @@ fn run_price(
         })
     });
 
-    let listings = market
-        .sample
-        .iter()
+    // Sorted by what they actually cost to get here, which is not the order they are
+    // priced in: a cheaper guitar from further away is often the dearer one.
+    let destination = search
+        .ships_to
+        .as_ref()
+        .map(|code| {
+            Regions::load(client).map(|regions| {
+                let label = regions
+                    .name(code)
+                    .map(|name| format!("{name} ({code})"))
+                    .unwrap_or_else(|| code.clone());
+                (label, regions.chain(code))
+            })
+        })
+        .transpose()?;
+    let chain = destination.as_ref().map(|(_, chain)| chain.as_slice());
+    let mut shown: Vec<&reverb::Listing> = market.sample.iter().collect();
+    if let Some(chain) = chain {
+        shown.sort_by_key(|listing| {
+            shipping::landed(listing, chain).unwrap_or_else(|| listing.amount())
+        });
+    }
+    let listings = shown
+        .into_iter()
         .take(arguments.listings)
-        .map(|listing| ListingSummary::of(listing, &market.currency, bands.as_ref()))
+        .map(|listing| ListingSummary::of(listing, &market.currency, bands.as_ref(), chain))
         .collect();
 
     let report = PriceReport {
@@ -411,6 +445,7 @@ fn run_price(
         bands: bands.as_ref().map(|bands| BandTable::of(bands, &market)),
         class: class.as_ref().map(ClassSummary::of),
         asking,
+        delivered_to: destination.as_ref().map(|(code, _)| code.clone()),
         listings,
         diagnostics: Diagnostics::from(client.usage(), warnings),
     };
@@ -603,8 +638,18 @@ fn run_listings(
     let bands = Bands::of(&market);
 
     progress.set("Fetching listings");
+    let chain = search
+        .ships_to
+        .as_ref()
+        .map(|code| Regions::load(client).map(|regions| regions.chain(code)))
+        .transpose()?;
     let wanted = arguments.limit.clamp(1, MAX_PER_PAGE);
     let mut listings = client.listings(&search, 1, wanted)?.listings;
+    if let Some(chain) = &chain {
+        listings.sort_by_key(|listing| {
+            shipping::landed(listing, chain).unwrap_or_else(|| listing.amount())
+        });
+    }
     if arguments.deals {
         if let Some(bands) = &bands {
             listings.retain(|listing| {
@@ -635,10 +680,13 @@ fn run_listings(
         condition: arguments.filters.condition.label().to_string(),
         matched: market.total,
         shown: listings.len(),
+        delivered_to: search.ships_to.clone(),
         bands: bands.as_ref().map(|bands| BandTable::of(bands, &market)),
         listings: listings
             .iter()
-            .map(|listing| ListingSummary::of(listing, &market.currency, bands.as_ref()))
+            .map(|listing| {
+                ListingSummary::of(listing, &market.currency, bands.as_ref(), chain.as_deref())
+            })
             .collect(),
         diagnostics: Diagnostics::from(client.usage(), warnings),
     };

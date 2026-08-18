@@ -42,6 +42,9 @@ pub struct PriceReport {
     pub class: Option<ClassSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asking: Option<AskingVerdict>,
+    /// The destination the market was narrowed to, when one was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_to: Option<String>,
     pub listings: Vec<ListingSummary>,
     pub diagnostics: Diagnostics,
 }
@@ -263,6 +266,12 @@ pub struct AskingVerdict {
 pub struct ListingSummary {
     pub id: u64,
     pub price: f64,
+    /// What the seller charges to send it to the chosen destination.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shipping: Option<f64>,
+    /// Price plus shipping. Absent when the carrier prices it at checkout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered: Option<f64>,
     pub condition: String,
     pub title: String,
     pub shop: String,
@@ -276,10 +285,22 @@ pub struct ListingSummary {
 }
 
 impl ListingSummary {
-    pub fn of(listing: &Listing, currency: &str, bands: Option<&Bands>) -> Self {
+    pub fn of(
+        listing: &Listing,
+        currency: &str,
+        bands: Option<&Bands>,
+        destination: Option<&[String]>,
+    ) -> Self {
+        let cost = destination.map(|chain| crate::shipping::cost(listing, chain));
         Self {
             id: listing.id,
             price: listing.amount().major(currency),
+            shipping: cost
+                .and_then(crate::shipping::Cost::amount)
+                .map(|amount| amount.major(currency)),
+            delivered: destination
+                .and_then(|chain| crate::shipping::landed(listing, chain))
+                .map(|amount| amount.major(currency)),
             condition: listing.condition.display_name.clone(),
             title: listing.describe(),
             shop: listing.shop_name.clone(),
@@ -390,6 +411,9 @@ pub struct ListingReport {
     pub condition: String,
     pub matched: u32,
     pub shown: usize,
+    /// The destination prices are quoted delivered to, when one was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bands: Option<BandTable>,
     pub listings: Vec<ListingSummary>,

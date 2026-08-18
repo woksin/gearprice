@@ -28,6 +28,9 @@ struct Item {
     /// When the listing went up, as an RFC 3339 timestamp.
     published_at: String,
     offers: bool,
+    /// Region code to shipping cost in minor units. `None` means the carrier prices it
+    /// at checkout, which is how Reverb reports a rate it cannot quote up front.
+    shipping: Vec<(&'static str, Option<i64>)>,
 }
 
 /// A stub Reverb.
@@ -160,6 +163,8 @@ fn listings_response(path: &str, inventory: &[Item], honour_condition: bool) -> 
     let condition = honour_condition
         .then(|| parameters.get("condition[]").cloned())
         .flatten();
+    // Reverb filters on this server-side, and ignores a value it does not recognise.
+    let ships_to = parameters.get("ships_to").cloned();
 
     let mut matched: Vec<&Item> = inventory
         .iter()
@@ -170,6 +175,15 @@ fn listings_response(path: &str, inventory: &[Item], honour_condition: bool) -> 
             Some("used") => item.grade != "brand-new",
             Some("new") => item.grade == "brand-new",
             Some(grade) => item.grade == grade,
+        })
+        .filter(|item| match ships_to.as_deref() {
+            None | Some("") => true,
+            // Only codes in the tree filter; anything else Reverb ignores entirely.
+            Some(code) if !["NO", "US_CON", "EUR_NON_EU", "XX"].contains(&code) => true,
+            Some(code) => {
+                item.shipping.iter().any(|(region, _)| *region == code)
+                    || item.shipping.iter().any(|(region, _)| *region == "XX")
+            }
         })
         .collect();
     matched.sort_by_key(|item| item.price_cents);
@@ -235,6 +249,10 @@ fn listing_from(id: u64, item: &Item) -> Value {
         "offers_enabled": item.offers,
         "condition": {"slug": item.grade, "display_name": item.grade},
         "price": {"amount_cents": item.price_cents, "currency": "USD"},
+        "shipping": {"rates": item.shipping.iter().map(|(code, cost)| json!({
+            "region_code": code,
+            "rate": cost.map(|cost| json!({"amount_cents": cost})),
+        })).collect::<Vec<_>>()},
         "_links": {"web": {"href": format!("https://reverb.com/item/{id}")}}
     });
     if !item.published_at.is_empty() {
@@ -284,6 +302,7 @@ fn inventory(count: i64, low: i64, high: i64) -> Vec<Item> {
             title: "Gibson Les Paul Standard",
             published_at: String::new(),
             offers: false,
+            shipping: Vec::new(),
         })
         .collect()
 }
@@ -291,6 +310,20 @@ fn inventory(count: i64, low: i64, high: i64) -> Vec<Item> {
 /// The canned responses every test needs: the catalogue model and the category tree.
 fn catalogue_routes(used_total: i64) -> HashMap<String, Value> {
     let mut routes = HashMap::new();
+    routes.insert(
+        "/shipping/regions".to_string(),
+        json!({"shipping_regions": [
+            {"code": "XX", "name": "Everywhere", "children": []},
+            {"code": "EUR_NON_EU", "name": "Europe (Non-EU)", "children": [
+                {"code": "NO", "name": "Norway", "children": []}
+            ]},
+            {"code": "NORTH_AMERICA", "name": "North America", "children": [
+                {"code": "US", "name": "United States", "children": [
+                    {"code": "US_CON", "name": "Continental U.S.", "children": []}
+                ]}
+            ]}
+        ]}),
+    );
     routes.insert(
         "/categories".to_string(),
         json!({"categories": [{
@@ -502,6 +535,7 @@ fn a_filter_the_server_ignores_is_reported_rather_than_passed_off_as_filtered() 
             title: "Gibson Les Paul Standard",
             published_at: String::new(),
             offers: false,
+            shipping: Vec::new(),
         })
         .collect();
     let stub = Stub::start_with(stock, catalogue_routes(30), 0, false);
@@ -634,6 +668,7 @@ fn a_band_that_is_not_clearing_shows_the_age_of_what_is_stuck_in_it() {
             title: "Gibson Les Paul Standard",
             published_at: listed_days_ago(if index < 50 { 14 } else { 800 }),
             offers: index % 4 != 0,
+            shipping: Vec::new(),
         })
         .collect();
     let stub = Stub::start(stock, catalogue_routes(100), 0);
@@ -679,6 +714,80 @@ fn a_market_with_no_publication_dates_simply_omits_the_ages() {
 }
 
 #[test]
+fn a_destination_narrows_the_market_and_prices_it_delivered() {
+    // Half the sellers ship worldwide, half only within the continental US. A buyer in
+    // Norway can buy from half of them, and pays the Europe rate rather than the
+    // everywhere-else one.
+    let stock: Vec<Item> = (0..40)
+        .map(|index| Item {
+            price_cents: 100_000 + index * 1_000,
+            grade: "excellent",
+            title: "Gibson Les Paul Standard",
+            published_at: String::new(),
+            offers: false,
+            shipping: if index % 2 == 0 {
+                vec![
+                    ("US_CON", Some(5_000)),
+                    ("EUR_NON_EU", Some(12_000)),
+                    ("XX", Some(36_000)),
+                ]
+            } else {
+                vec![("US_CON", Some(5_000))]
+            },
+        })
+        .collect();
+    let stub = Stub::start(stock, catalogue_routes(40), 0);
+    let report = json_of(&stub.run(&["price", "Les Paul", "--ships-to", "no", "--format", "json"]));
+
+    assert_eq!(
+        20, report["market"]["listings"],
+        "half the sellers ship there"
+    );
+    assert_eq!("Norway (NO)", report["delivered_to"]);
+
+    let cheapest = &report["listings"][0];
+    // The Europe rate, not the everywhere-else rate three times its size.
+    assert_eq!(120.0, cheapest["shipping"]);
+    assert_eq!(
+        cheapest["price"].as_f64().unwrap() + 120.0,
+        cheapest["delivered"].as_f64().unwrap()
+    );
+}
+
+#[test]
+fn a_rate_the_carrier_sets_at_checkout_is_left_unknown_rather_than_free() {
+    let stock: Vec<Item> = (0..12)
+        .map(|index| Item {
+            price_cents: 100_000 + index * 1_000,
+            grade: "excellent",
+            title: "Gibson Les Paul Standard",
+            published_at: String::new(),
+            offers: false,
+            shipping: vec![("XX", None)],
+        })
+        .collect();
+    let stub = Stub::start(stock, catalogue_routes(12), 0);
+    let report = json_of(&stub.run(&["price", "Les Paul", "--ships-to", "NO", "--format", "json"]));
+    let cheapest = &report["listings"][0];
+    assert!(
+        cheapest["shipping"].is_null(),
+        "an unknown rate must not read as zero"
+    );
+    assert!(cheapest["delivered"].is_null());
+}
+
+#[test]
+fn a_destination_reverb_does_not_know_is_refused_rather_than_ignored() {
+    // Reverb answers an unrecognised ships_to with the whole unfiltered market, so a
+    // typo here would quietly price gear that will never be sent.
+    let stub = Stub::start(inventory(20, 100_000, 200_000), catalogue_routes(20), 0);
+    let output = stub.run(&["price", "Les Paul", "--ships-to", "Norwayland"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("not a shipping destination"), "{error}");
+}
+
+#[test]
 fn an_unknown_category_fails_instead_of_silently_pricing_the_whole_marketplace() {
     let stub = Stub::start(Vec::new(), empty_market_routes(), 0);
     let output = stub.run(&["classes", "electric-guitar"]);
@@ -711,6 +820,7 @@ fn csv_output_is_a_flat_table_and_defuses_spreadsheet_formulas() {
             title: "=HYPERLINK(\"http://evil.invalid\")",
             published_at: String::new(),
             offers: false,
+            shipping: Vec::new(),
         })
         .collect();
     let stub = Stub::start(hostile, catalogue_routes(20), 0);
