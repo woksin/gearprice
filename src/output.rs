@@ -94,7 +94,12 @@ pub fn print_json(value: &impl serde::Serialize) -> Result<()> {
 // Price
 // ---------------------------------------------------------------------------
 
-pub fn print_price(report: &PriceReport, style: Style) {
+/// The price report.
+///
+/// `full` restores the parts trimmed by default. The trimmed ones — the histogram above
+/// all — describe the *asking* prices, which are the secondary number now that bands come
+/// from completed sales, and the report ran to sixty lines with them in.
+pub fn print_price(report: &PriceReport, style: Style, full: bool) {
     let currency = report.currency.as_str();
     let money_of = |value: f64| money::format(Money::from_major(value, currency), currency);
 
@@ -158,7 +163,7 @@ pub fn print_price(report: &PriceReport, style: Style) {
                 .unwrap_or_else(|| "—".into()),
             style.dim(&match (sold.asking_premium, sold.asking_percentile) {
                 (Some(premium), Some(percentile)) => format!(
-                    "{:+.0}% above sold — the {} percentile of what anyone paid",
+                    "{:+.0}% above sold · {} percentile of what was paid",
                     premium * 100.0,
                     ordinal(percentile)
                 ),
@@ -215,9 +220,9 @@ pub fn print_price(report: &PriceReport, style: Style) {
         );
         for other in &report.alternatives {
             println!(
-                "  {:<21} {:<44} {}",
+                "  {:<21} {:<36} {}",
                 "",
-                truncate(&other.title, 44),
+                truncate(&other.title, 36),
                 style.dim(&format!(
                     "--model-id {:<9} {} used",
                     other.id,
@@ -277,7 +282,7 @@ pub fn print_price(report: &PriceReport, style: Style) {
     }
 
     if !report.market.percentiles.is_empty() && report.market.listings > 0 {
-        print_distribution(report, currency, style);
+        print_distribution(report, currency, style, full);
     }
 
     let (grades, grade_heading) = match report.sold.as_ref().filter(|sold| !sold.grades.is_empty())
@@ -365,7 +370,7 @@ fn print_bands(bands: &BandTable, currency: &str, style: Style) {
     );
     if paired {
         println!(
-            "  {:<9} {:>25} {:>7} {:>25}  ",
+            "  {:<9} {:>25} {:>7} {:>25}",
             "Band", "Sold range", "Share", "Asking equivalent"
         );
     } else if timed {
@@ -390,13 +395,14 @@ fn print_bands(bands: &BandTable, currency: &str, style: Style) {
             .find(|band| band.name() == row.band)
             .unwrap_or(Band::Fair);
         if paired {
+            // No trailing verdict here: with both price columns the row is already at the
+            // rule, and the band name and the caption below say what it means.
             println!(
-                "  {:<9} {:>25} {:>7} {:>25}  {}",
+                "  {:<9} {:>25} {:>7} {:>25}",
                 style.band(band, &row.band),
                 range,
                 format!("{:.0}%", row.share * 100.0),
                 price_range(row.asking_from, row.asking_to, currency, coarse),
-                style.dim(&row.verdict)
             );
         } else if timed {
             println!(
@@ -454,7 +460,7 @@ fn days(count: i64) -> String {
     }
 }
 
-fn print_distribution(report: &PriceReport, currency: &str, style: Style) {
+fn print_distribution(report: &PriceReport, currency: &str, style: Style, full: bool) {
     println!();
     println!("{}", style.bold("Distribution"));
     let mut cells = vec![
@@ -486,7 +492,7 @@ fn print_distribution(report: &PriceReport, currency: &str, style: Style) {
     println!("  {}", style.dim(&labels.join(" ")));
     println!("  {}", values.join(" "));
 
-    if !report.market.histogram.is_empty() {
+    if !report.market.histogram.is_empty() && full {
         println!();
         println!(
             "  {}",

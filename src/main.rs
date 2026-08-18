@@ -49,16 +49,28 @@ const ABOUT: &str = "What guitar gear costs on Reverb right now, and what class 
 const LONG_ABOUT: &str = "\
 What guitar gear costs on Reverb right now, and what class it sits in.
 
-gearprice reads Reverb's public marketplace — no account, no API key — and turns it into
-two answers. Price bands say whether an asking price is a steal or a fleecing for that
-model. A price class says where the model itself sits among its peers: entry, mid, pro,
-premium or boutique.
+gearprice reads Reverb's public marketplace — no account, no API key — and answers three
+things. What the gear actually sells for, from completed sales rather than hopeful asking
+prices. Whether a given price is a steal or a fleecing. And what class of gear it is:
+entry, mid, pro, premium or boutique.
 
-Every number is drawn from live listings, which are asking prices. Reverb retired its
-public sold-price endpoint, so nothing here is a record of what anything sold for.";
+Looking at a listing right now? `gearprice deal <paste the address>` judges that one.";
+
+/// Shown under the command list, because a list of eleven commands is not an answer to
+/// "what do I type".
+const EXAMPLES: &str = "\
+Examples:
+  gearprice \"gibson les paul standard\"          what it sells for, and what class it is
+  gearprice deal https://reverb.com/item/…      is this listing worth it?
+  gearprice \"les paul\" --asking 1900            is 1900 a good price?
+  gearprice variants \"marshall major\"           which version am I looking at?
+  gearprice \"jazzmaster\" -c NOK --ships-to NO   in kroner, from sellers who post to Norway
+  gearprice classes electric-guitars            what entry, mid and boutique cost
+
+Spelling is forgiven: \"gibsen les pual standrd\" finds the Les Paul Standard.";
 
 #[derive(Debug, Parser)]
-#[command(name = "gearprice", version, about = ABOUT, long_about = LONG_ABOUT)]
+#[command(name = "gearprice", version, about = ABOUT, long_about = LONG_ABOUT, after_help = EXAMPLES)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -194,8 +206,12 @@ struct PriceArguments {
     sold_sample: u32,
 
     /// How many listings to show.
-    #[arg(long, default_value_t = 5, value_name = "N")]
+    #[arg(long, default_value_t = 3, value_name = "N")]
     listings: usize,
+
+    /// Show the asking-price histogram and everything else that is normally trimmed.
+    #[arg(long)]
+    full: bool,
 
     #[command(flatten)]
     filters: Filters,
@@ -678,7 +694,7 @@ fn run_price(
     };
 
     match cli.format {
-        Format::Table => output::print_price(&report, style),
+        Format::Table => output::print_price(&report, style, arguments.full),
         Format::Json => output::print_json(&report)?,
         Format::Csv => output::print_price_csv(&report)?,
     }

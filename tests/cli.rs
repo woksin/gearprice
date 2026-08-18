@@ -490,8 +490,9 @@ fn version_and_help_describe_the_tool_without_touching_the_network() {
     for command in ["price", "models", "listings", "classes", "categories"] {
         assert!(help.contains(command), "--help does not mention {command}");
     }
-    // The one caveat a reader must not miss.
-    assert!(help.contains("asking prices"), "{help}");
+    // The distinction the whole tool rests on: sold prices, not asking prices.
+    assert!(help.contains("actually sells for"), "{help}");
+    assert!(help.contains("completed sales"), "{help}");
 }
 
 #[test]

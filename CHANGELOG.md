@@ -32,6 +32,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `--help` still claimed sold prices were unobtainable, which is the first thing anyone
+  reads and had been wrong since the sold history was found.
+- The default price report ran to sixty-three lines and buried its own answer. The
+  asking-price histogram moved behind `--full`, listings default to three, and the sold
+  band table no longer runs past the rule.
 - Years are read from listing titles rather than trusting Reverb's year field, which on
   some models holds the model designation (Marshall's guitar Major is Model 1967 and was
   built from 1968) and on others holds the production range (`1968 - 1974`). Both dated
