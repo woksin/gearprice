@@ -17,6 +17,9 @@ use crate::reverb::{CatalogueModel, Listing, Usage};
 /// that blurred the two would be worse than useless for deciding what to pay.
 pub const SOURCE: &str = "live Reverb listings — asking prices, not sold prices";
 
+/// The same caveat, short enough for a table header.
+pub const SOURCE_SHORT: &str = "asking prices, not sold prices";
+
 #[derive(Debug, Serialize)]
 pub struct PriceReport {
     pub query: String,

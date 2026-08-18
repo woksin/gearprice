@@ -11,7 +11,7 @@ use anyhow::Result;
 use crate::classify::{Band, Segment};
 use crate::money::{self, Money};
 use crate::report::{
-    BandTable, ClassReport, ListingReport, ListingSummary, ModelReport, PriceReport,
+    BandTable, ClassReport, ListingReport, ListingSummary, ModelReport, PriceReport, SOURCE_SHORT,
 };
 
 const RULE_WIDTH: usize = 92;
@@ -120,9 +120,10 @@ pub fn print_price(report: &PriceReport, style: Style) {
         number(report.market.listings),
         report.condition,
         currency,
-        style.dim(report.source)
+        style.dim(SOURCE_SHORT)
     );
     println!("  {:<21} {}", "Method", style.dim(&report.market.method));
+    print_warnings(&report.diagnostics, style);
 
     if let Some(class) = &report.class {
         println!();
@@ -169,7 +170,9 @@ pub fn print_price(report: &PriceReport, style: Style) {
         print_bands(bands, currency, style);
     }
 
-    print_distribution(report, currency, style);
+    if !report.market.percentiles.is_empty() && report.market.listings > 0 {
+        print_distribution(report, currency, style);
+    }
 
     if !report.market.grades.is_empty() {
         println!();
@@ -198,7 +201,7 @@ pub fn print_price(report: &PriceReport, style: Style) {
         print_listing_rows(&report.listings, currency, style);
     }
 
-    print_diagnostics(&report.diagnostics, style);
+    print_usage(&report.diagnostics, style);
 }
 
 fn print_bands(bands: &BandTable, currency: &str, style: Style) {
@@ -296,7 +299,7 @@ pub fn print_models(report: &ModelReport, style: Style) {
     println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
     if report.models.is_empty() {
         println!("  No catalogue model matches that. Try fewer words, or a different spelling.");
-        print_diagnostics(&report.diagnostics, style);
+        print_usage(&report.diagnostics, style);
         return;
     }
     println!(
@@ -335,7 +338,7 @@ pub fn print_models(report: &ModelReport, style: Style) {
             ))
         );
     }
-    print_diagnostics(&report.diagnostics, style);
+    print_usage(&report.diagnostics, style);
 }
 
 pub fn print_classes(report: &ClassReport, style: Style) {
@@ -351,9 +354,10 @@ pub fn print_classes(report: &ClassReport, style: Style) {
         number(report.listings),
         report.condition,
         currency,
-        style.dim(report.source)
+        style.dim(SOURCE_SHORT)
     );
     println!("  {:<21} {}", "Method", style.dim(&report.method));
+    print_warnings(&report.diagnostics, style);
     println!();
     println!("  {:<10} {:>27} {:>7}  Meaning", "Class", "Range", "Share");
     println!("  {}", style.dim(&"─".repeat(RULE_WIDTH - 2)));
@@ -368,7 +372,7 @@ pub fn print_classes(report: &ClassReport, style: Style) {
             style.dim(&row.description)
         );
     }
-    print_diagnostics(&report.diagnostics, style);
+    print_usage(&report.diagnostics, style);
 }
 
 pub fn print_listings(report: &ListingReport, style: Style) {
@@ -385,15 +389,16 @@ pub fn print_listings(report: &ListingReport, style: Style) {
         number(report.matched),
         report.condition,
         currency,
-        style.dim(report.source)
+        style.dim(SOURCE_SHORT)
     );
+    print_warnings(&report.diagnostics, style);
     if let Some(bands) = &report.bands {
         println!();
         print_bands(bands, currency, style);
     }
     println!();
     print_listing_rows(&report.listings, currency, style);
-    print_diagnostics(&report.diagnostics, style);
+    print_usage(&report.diagnostics, style);
 }
 
 fn print_listing_rows(listings: &[ListingSummary], currency: &str, style: Style) {
@@ -427,10 +432,52 @@ fn print_listing_rows(listings: &[ListingSummary], currency: &str, style: Style)
     }
 }
 
-fn print_diagnostics(diagnostics: &crate::report::Diagnostics, style: Style) {
-    for warning in &diagnostics.warnings {
-        eprintln!("  {} {warning}", style.paint("33", "warning:"));
+/// Warnings go first, because they change how the numbers under them should be read.
+///
+/// "No catalogue model matched, so this prices the words themselves" is not a footnote:
+/// a reader who sees it after the bands has already believed them.
+fn print_warnings(diagnostics: &crate::report::Diagnostics, style: Style) {
+    if diagnostics.warnings.is_empty() {
+        return;
     }
+    println!();
+    for warning in &diagnostics.warnings {
+        for (index, line) in wrap(warning, RULE_WIDTH - 6).into_iter().enumerate() {
+            let marker = if index == 0 {
+                style.paint("33;1", "!")
+            } else {
+                " ".to_string()
+            };
+            println!("  {marker} {}", style.paint("33", &line));
+        }
+    }
+}
+
+/// Wraps on whitespace at `width`, so a warning stays inside the rule the tables use.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let projected = if current.is_empty() {
+            word.chars().count()
+        } else {
+            current.chars().count() + 1 + word.chars().count()
+        };
+        if projected > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn print_usage(diagnostics: &crate::report::Diagnostics, style: Style) {
     println!();
     println!(
         "{}",
@@ -735,6 +782,29 @@ mod tests {
         assert_eq!("text", plain.dim("text"));
         let colored = Style { color: true };
         assert!(colored.band(Band::Premium, "premium").contains("\x1b["));
+    }
+
+    #[test]
+    fn warnings_wrap_inside_the_rule_without_losing_a_word() {
+        let warning = "no catalogue model matches \"zzqqxx not a real instrument\", so this \
+                       prices the words themselves — results may include unrelated gear";
+        let lines = wrap(warning, 60);
+        assert!(lines.len() > 1);
+        assert!(
+            lines.iter().all(|line| line.chars().count() <= 60),
+            "{lines:?}"
+        );
+        // Every word survives the wrap, in order.
+        assert_eq!(
+            warning.split_whitespace().collect::<Vec<_>>(),
+            lines.join(" ").split_whitespace().collect::<Vec<_>>()
+        );
+        // A word longer than the width goes on its own line rather than vanishing.
+        assert_eq!(
+            vec!["supercalifragilistic"],
+            wrap("supercalifragilistic", 5)
+        );
+        assert!(wrap("", 20).is_empty());
     }
 
     #[test]

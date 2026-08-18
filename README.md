@@ -40,7 +40,7 @@ GEARPRICE  Gibson Les Paul Standard '60s (2019 - Present)
 ════════════════════════════════════════════════════════════════════════════════════════════
   Model                 Gibson · electric-guitars
                         https://reverb.com/p/gibson-les-paul-standard-60s-2019-present
-  Market                174 used listings · USD · live Reverb listings — asking prices
+  Market                174 used listings · USD · asking prices, not sold prices
   Method                read all 174 listings
 
   Class                 PRO  above the category median
