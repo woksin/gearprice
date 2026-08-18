@@ -49,17 +49,19 @@ const LADDER_STEPS: u32 = 8;
 /// than the rounds fall, and they all land on somebody else's server.
 const WIDE_ARITY: MajorUnits = 4;
 
-/// The widest bracket still worth enumerating outright rather than cutting again.
+/// The widest bracket still worth cutting rather than simply enumerating.
 ///
-/// Cutting a bracket this small is a false economy. Tracing `classes electric-guitars`
-/// cold showed the search reaching a six-unit bracket in five quartered rounds and then
-/// spending two more rounds crawling down it one probe at a time — and by then the other
-/// percentiles had finished, so those two rounds were 3.4s of the 21s with a single
-/// request in flight. Asking for every price left in the bracket at once settles it in one
-/// round for at most five requests, which is what a cutting round costs anyway.
+/// Below this the search asks for every price left in the bracket at once and is finished,
+/// because cutting something this small is a false economy. Tracing `classes
+/// electric-guitars` cold showed p80 and p95 each quarter their way down to a three-unit
+/// bracket and then spend two more rounds resolving it one probe at a time; by then the
+/// other percentiles had finished, so that was the last three seconds of a twenty-one
+/// second run with one request in flight.
 ///
-/// Six is where the exchange stops paying: a wider sweep buys another round trip, but the
-/// price doubles with every unit of width, and they all land on somebody else's server.
+/// Six is a chosen ceiling rather than a discovered one. A wider sweep does buy another
+/// round trip on a big category, but it costs a request per unit of width and four
+/// percentiles sweeping together would put far more in flight than the dozen the client
+/// paces for.
 const WIDE_ENOUGH: MajorUnits = 6;
 
 /// The percentiles every price report quotes, as fractions of the population.
@@ -363,13 +365,22 @@ fn logarithmic_step(low: MajorUnits, high: MajorUnits, step: u32, steps: u32) ->
 mod tests {
     use super::*;
 
-    use std::sync::atomic::{AtomicU32, Ordering};
+    /// A round trip's worth of waiting, scaled down.
+    ///
+    /// Reverb takes well over a second to answer a count, which is the only reason probes
+    /// issued together are ever in flight together. A counter that answers instantly would
+    /// let a round finish one probe at a time and quietly hide both of the things the tests
+    /// below are about.
+    const ROUND_TRIP: std::time::Duration = std::time::Duration::from_millis(2);
 
     /// The truth a sketch is checked against: a population held in memory, counted the
     /// same way Reverb counts, and charged for every probe.
     struct Population {
         prices: Vec<MajorUnits>,
-        probes: AtomicU32,
+        asked: Mutex<Vec<MajorUnits>>,
+        /// Probes currently unanswered, and how many times that has risen from none.
+        /// With a single percentile searching, that is exactly the number of round trips.
+        in_flight: Mutex<(u32, u32)>,
     }
 
     impl Population {
@@ -377,17 +388,43 @@ mod tests {
             prices.sort_unstable();
             Self {
                 prices,
-                probes: AtomicU32::new(0),
+                asked: Mutex::new(Vec::new()),
+                in_flight: Mutex::new((0, 0)),
             }
         }
 
         fn count_at_or_below(&self, price: MajorUnits) -> Result<u32> {
-            self.probes.fetch_add(1, Ordering::Relaxed);
-            Ok(self.prices.partition_point(|value| *value <= price) as u32)
+            self.asked.lock().unwrap().push(price);
+            {
+                let mut in_flight = self.in_flight.lock().unwrap();
+                if in_flight.0 == 0 {
+                    in_flight.1 += 1;
+                }
+                in_flight.0 += 1;
+            }
+            std::thread::sleep(ROUND_TRIP);
+            let count = self.prices.partition_point(|value| *value <= price) as u32;
+            self.in_flight.lock().unwrap().0 -= 1;
+            Ok(count)
         }
 
         fn probes(&self) -> u32 {
-            self.probes.load(Ordering::Relaxed)
+            self.asked.lock().unwrap().len() as u32
+        }
+
+        fn rounds(&self) -> u32 {
+            self.in_flight.lock().unwrap().1
+        }
+
+        /// Prices asked for more than once, which should be none of them.
+        fn asked_twice(&self) -> Vec<MajorUnits> {
+            let mut asked = self.asked.lock().unwrap().clone();
+            asked.sort_unstable();
+            asked
+                .chunk_by(|left, right| left == right)
+                .filter(|run| run.len() > 1)
+                .map(|run| run[0])
+                .collect()
         }
 
         /// The percentile a full enumeration would report, by the same nearest-rank rule.
@@ -455,9 +492,45 @@ mod tests {
         // hopeless; a per-percentile search without the shared ladder would be far worse.
         assert!(
             probes <= 170,
-            "took {probes} probes — quartering a wide bracket then interpolating a narrow \
-             one should settle seven percentiles across a 100,000-unit range without \
-             brute force"
+            "took {probes} probes — quartering a wide bracket and enumerating a narrow one \
+             should settle seven percentiles across a 100,000-unit range without brute force"
+        );
+    }
+
+    #[test]
+    fn a_price_is_never_counted_twice_however_many_searches_want_it() {
+        // The searches all start from brackets the same ladder handed them, so two of them
+        // land in one bracket and quarter it into the same three cuts. Tracing
+        // `classes electric-guitars` cold caught 6 of its 88 requests going out as exact
+        // duplicates of a sibling's, issued in the same instant — which no memo can catch,
+        // because neither answer existed yet.
+        let prices: Vec<MajorUnits> = (0..5_000).map(|index| 50 + index * 20).collect();
+        let (_, population) = sketch_of(prices, &REPORT_PERCENTILES);
+        assert_eq!(
+            Vec::<MajorUnits>::new(),
+            population.asked_twice(),
+            "these prices were counted more than once, at {} probes in total",
+            population.probes()
+        );
+    }
+
+    #[test]
+    fn the_endgame_is_enumerated_in_one_round_rather_than_walked_down() {
+        // One percentile, so the rounds are cleanly separated: with several searching at
+        // once their rounds interleave and there is nothing to count.
+        //
+        // Nine is the whole budget for a p90 over a 100,000-unit range: the ladder, seven
+        // quarterings to bring the bracket under six units, and one round that asks for
+        // every price left in it. The same search took ten before the last round existed,
+        // because it walked down those six units a probe at a time.
+        let prices: Vec<MajorUnits> = (0..5_000).map(|index| 50 + index * 20).collect();
+        let (result, population) = sketch_of(prices, &[0.90]);
+        assert_eq!(Some(population.true_quantile(0.90)), result.quantile(0.90));
+        let rounds = population.rounds();
+        assert!(
+            rounds <= 9,
+            "took {rounds} round trips to settle one percentile, and a round trip is the \
+             only thing this module spends"
         );
     }
 
