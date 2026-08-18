@@ -3,6 +3,7 @@
 mod cache;
 mod classify;
 mod config;
+mod guide;
 mod history;
 mod market;
 mod money;
@@ -71,7 +72,8 @@ Examples:
   gearprice \"jazzmaster\" -c NOK --ships-to NO   in kroner, from sellers who post to Norway
   gearprice classes electric-guitars            what entry, mid and boutique cost
 
-Spelling is forgiven: \"gibsen les pual standrd\" finds the Les Paul Standard.";
+Spelling is forgiven: \"gibsen les pual standrd\" finds the Les Paul Standard.
+New here? `gearprice guide` walks through it.";
 
 #[derive(Debug, Parser)]
 #[command(name = "gearprice", version, about = ABOUT, long_about = LONG_ABOUT, after_help = EXAMPLES)]
@@ -171,6 +173,8 @@ enum Command {
     Deal(Box<DealArguments>),
     /// Record what a market costs today, and show what it has done since
     Track(Box<TrackArguments>),
+    /// A short walkthrough: what to type, and what the numbers mean
+    Guide,
     /// Print a shell completion script
     Completions(CompletionArguments),
     /// Show where settings are read from, and print a sample file
@@ -505,6 +509,11 @@ fn run() -> Result<()> {
     match &cli.command {
         Command::Update(arguments) => return run_update(arguments),
         Command::Cache(arguments) => return run_cache(arguments, &cli),
+        Command::Guide => {
+            let colour = !cli.no_color && std::env::var_os("NO_COLOR").is_none();
+            return pager::paged(cli.settled.no_pager, |out| guide::write(out, colour))
+                .map_err(Into::into);
+        }
         Command::Config(arguments) => {
             if arguments.example {
                 print!("{}", config::example_config());
@@ -571,9 +580,11 @@ fn run() -> Result<()> {
         Command::Deal(arguments) => run_deal(&cli, arguments, &client, &progress, style),
         Command::Track(arguments) => run_track(&cli, arguments, &client, &progress, style),
         Command::Categories => run_categories(&cli, &client, &progress, style),
-        Command::Cache(_) | Command::Update(_) | Command::Completions(_) | Command::Config(_) => {
-            unreachable!("handled above")
-        }
+        Command::Cache(_)
+        | Command::Update(_)
+        | Command::Completions(_)
+        | Command::Config(_)
+        | Command::Guide => unreachable!("handled above"),
     };
     progress.finish();
     result

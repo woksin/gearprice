@@ -121,28 +121,69 @@ week would be useless:
 
 ## Install
 
-**Homebrew**
+<table>
+<tr><td width="150"><b>Homebrew</b><br><sub>macOS · Linux</sub></td><td>
 
 ```bash
-brew install woksin/gearprice/gearprice
+brew tap woksin/gearprice
+brew trust woksin/gearprice   # Homebrew 6 gates third-party taps
+brew install gearprice
 ```
 
-**From a release** — download the binary for your platform from
-[the latest release](https://github.com/woksin/gearprice/releases/latest) and put it on
-your `PATH`. Every asset is listed in `SHA256SUMS` on the same release.
+</td></tr>
+<tr><td><b>Binary</b><br><sub>no toolchain</sub></td><td>
 
-**From source** — needs Rust 1.88 or newer.
+```bash
+# macOS, Apple silicon
+curl -fsSL https://github.com/woksin/gearprice/releases/latest/download/gearprice-macos-arm64.tar.gz | tar xz
+# Linux, x86_64
+curl -fsSL https://github.com/woksin/gearprice/releases/latest/download/gearprice-linux-x86_64.tar.gz | tar xz
+
+sudo mv gearprice /usr/local/bin/
+```
+
+Also `gearprice-macos-x86_64` and `gearprice-linux-arm64` — swap the last part of the
+name. Every release carries a `SHA256SUMS`.
+
+</td></tr>
+<tr><td><b>Windows</b><br><sub>no toolchain</sub></td><td>
+
+```powershell
+Invoke-WebRequest https://github.com/woksin/gearprice/releases/latest/download/gearprice-windows-x86_64.exe -OutFile gearprice.exe
+```
+
+Shipped as the executable itself — there is nothing to unpack. `gearprice-windows-x86.exe`
+is the 32-bit build. Put it anywhere on your `PATH`.
+
+</td></tr>
+<tr><td><b>Source</b><br><sub>Rust 1.88+</sub></td><td>
 
 ```bash
 git clone https://github.com/woksin/gearprice
 cd gearprice
-./install.sh              # or: .\install.ps1 on Windows
+./install.sh          # or .\install.ps1 on Windows
 ```
 
-Once installed, `gearprice update` upgrades in place, verifying the download against the
-release's published checksums first.
+</td></tr>
+</table>
 
----
+### Learning it
+
+```bash
+gearprice guide
+```
+
+Four commands and one caveat, in the order the questions come up. `gearprice completions
+zsh` (or `bash`, `fish`, `powershell`, `elvish`) sets up tab completion.
+
+### Staying current
+
+```bash
+gearprice update
+```
+
+Downloads the release for your platform and checks it against the published `SHA256SUMS`
+before replacing the running binary. `gearprice update --check` just looks.
 
 ## Commands
 
