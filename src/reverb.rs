@@ -43,8 +43,10 @@ pub const MAX_ENUMERABLE: u32 = MAX_PER_PAGE * MAX_PAGES;
 
 /// How many requests may be in flight to Reverb at once.
 ///
-/// Enough to stop the connection pool throttling the searches, and modest enough to stay
-/// a reasonable guest: the pacing below still keeps requests from leaving in a burst.
+/// Enough to stop the connection pool throttling the searches, and modest enough to stay a
+/// reasonable guest. It doubles as the burst [`Client::pace`] allows, because a burst is
+/// exactly one round of the percentile search and there is nothing to gain by letting more
+/// than this go out together.
 const CONCURRENCY: usize = 12;
 
 const RETRY_ATTEMPTS: u32 = 4;
@@ -134,7 +136,8 @@ impl Client {
     /// left in a chain, one every 80ms. Tracing `classes electric-guitars` cold showed what
     /// that costs: each round of the percentile search smeared its twelve requests over
     /// 0.93s on top of a 1.6s answer, and because a round is a barrier the smear was added
-    /// to the wall clock every time. Removing it took the run from 23.9s to 21.6s.
+    /// to the wall clock every time. Taking the smear out on its own moved a cold run from
+    /// 23.9s to 21.6s.
     ///
     /// What has to be paced is the average rate, not the gap between neighbours, so slots
     /// are handed out instead: a caller claims the next one under the lock and then sleeps
