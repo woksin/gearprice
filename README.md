@@ -146,12 +146,51 @@ release's published checksums first.
 
 ## Commands
 
+### `gearprice deal` — is this listing worth it?
+
+The one to reach for when you are looking at something. Paste the address:
+
+```console
+$ gearprice deal https://reverb.com/item/95521465-1969-marshall-major-200-watt-amp
+```
+
+```
+GEARPRICE  1969 Marshall Major 200 Watt Amp…VERY RARE
+════════════════════════════════════════════════════════════════════════════════════════════
+  Asking                    $4,300  HIGH
+                                    over three quarters of recent sales
+  Sold, last year           $4,100  this one is $200 above
+  Room                         -9%  typical off the ask · 13 of 39 went at or above it
+  An offer at               $3,909  would be the usual discount off this asking price
+  Listed for              5 months  a long wait at this price
+```
+
+### `gearprice variants` — which version is it?
+
+Reverb splits a model by era and by variant, and the differences are not cosmetic:
+
+```console
+$ gearprice variants "Marshall Major"
+```
+
+```
+  Version                                        Used Asking from        Sold   Sales
+  ──────────────────────────────────────────────────────────────────────────────────────────
+  Marshall JMP Model 1967 "Major" 200-Watt Gu…      6      $4,300      $4,100      39
+  Marshall JMP Model 1978 "Major" 200-Watt Ba…      1      $3,990      $2,645       6
+```
+
+Both are called "Major", both are 200 watts, and one sells for half again what the other
+does. Model 1967 is the guitar amp and Model 1978 is the bass amp — those are Marshall's
+model numbers, not years, which is a trap Reverb's own year field falls into.
+
 ### `gearprice price` — what one model costs
 
 The main one. Resolves what you typed to a model in Reverb's catalogue, measures its
 market, and reports the bands and the class.
 
 ```bash
+gearprice "Fender American Professional II Stratocaster"   # price is the default
 gearprice price "Fender American Professional II Stratocaster"
 gearprice price "Boss DS-1" --asking 45          # is 45 a good price?
 gearprice price "Les Paul Standard" --condition new
@@ -275,6 +314,12 @@ line — kept with your data rather than in the cache, because emptying the cach
 throw away the one thing that cannot be fetched again. A reading is only ever compared
 against others of the same question: same currency, same condition, same destination. A
 median in kroner beside one in dollars is not a price movement.
+
+### Odds and ends
+
+`gearprice completions zsh` (or `bash`, `fish`, `powershell`, `elvish`) prints a
+completion script. And the first argument can be the gear itself — `gearprice "les paul"`
+is `gearprice price "les paul"`.
 
 ### `gearprice categories` — the category tree
 
@@ -425,6 +470,7 @@ Available on `price` and `listings`.
 | `--no-sold` | Skip the sold history, saving a request or two |
 | `--model-id ID` | Price one exact catalogue model, from `gearprice models`. `price` and `listings` only |
 | `--raw` | Search the words given instead of resolving them to a model. `price` and `listings` only |
+| `--strict` | Never widen a thin catalogue market with a text search. `price` only |
 | `--category SLUG` | A slug from `gearprice categories`, or `root/leaf` |
 | `--make NAME` | One brand |
 | `--year-min`, `--year-max` | |

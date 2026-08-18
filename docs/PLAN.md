@@ -184,6 +184,8 @@ non-interactive stdout keep the current behaviour so scripts and pipes are unaff
 
 ## Added since, not in the original plan
 
+- `gearprice completions <shell>`, and a default command so the gear can be the first
+  argument.
 - `gearprice deal <url>` — paste a Reverb listing address and get a verdict on that one
   listing, including the offer that would be the usual discount off its asking price. A
   listing carries a `comparison_shopping` link to its catalogue model, which is what makes
@@ -204,8 +206,8 @@ non-interactive stdout keep the current behaviour so scripts and pipes are unaff
    widening query has to be the model's *signature* (`Marshall Major`) rather than its
    catalogue title, which no seller writes; and inclusion has to require words to be
    actually present rather than prefix-matched, or `G-Major2` joins the Major's market.
-5. `variants`.
-6. Interactive picking.
+5. ~~`variants`.~~ Done.
+6. Interactive picking — the one item still outstanding.
 
 ## Things worth not breaking
 

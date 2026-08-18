@@ -529,6 +529,34 @@ pub struct ClassRow {
     pub description: String,
 }
 
+/// Every catalogue entry in a family, side by side.
+#[derive(Debug, Serialize)]
+pub struct VariantReport {
+    pub query: String,
+    pub source: &'static str,
+    pub generated_at: String,
+    pub currency: String,
+    pub variants: Vec<VariantRow>,
+    pub diagnostics: Diagnostics,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VariantRow {
+    pub id: u64,
+    pub title: String,
+    pub used_listings: u32,
+    pub new_listings: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_from: Option<f64>,
+    /// What this variant actually sells for, which is the column that separates them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sold_median: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sold_recent_median: Option<f64>,
+    pub sales: u32,
+    pub url: String,
+}
+
 /// One listing, judged against what its model sells for.
 #[derive(Debug, Serialize)]
 pub struct DealReport {

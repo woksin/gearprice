@@ -12,7 +12,7 @@ use crate::classify::{Band, Basis, Segment};
 use crate::money::{self, Money};
 use crate::report::{
     BandTable, ClassReport, DealReport, ListingReport, ListingSummary, ModelReport, PriceReport,
-    SOURCE_SHORT, TrackReport, TrackedReport,
+    SOURCE_SHORT, TrackReport, TrackedReport, VariantReport,
 };
 
 const RULE_WIDTH: usize = 92;
@@ -747,6 +747,101 @@ fn print_usage(diagnostics: &crate::report::Diagnostics, style: Style) {
             diagnostics.requests, diagnostics.cache_hits
         ))
     );
+}
+
+pub fn print_variants(report: &VariantReport, style: Style) {
+    let currency = report.currency.as_str();
+    println!(
+        "{}",
+        style.bold(&format!("GEARPRICE  versions of “{}”", report.query))
+    );
+    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    print_warnings(&report.diagnostics, style);
+    println!(
+        "  {:<44} {:>6} {:>11} {:>11} {:>7}",
+        "Version", "Used", "Asking from", "Sold", "Sales"
+    );
+    println!("  {}", style.dim(&"─".repeat(RULE_WIDTH - 2)));
+    for variant in &report.variants {
+        // The recent median where the record is long, since that is the one to act on.
+        let sold = variant
+            .sold_recent_median
+            .or(variant.sold_median)
+            .map(|value| price(value, currency))
+            .unwrap_or_else(|| "—".into());
+        println!(
+            "  {:<44} {:>6} {:>11} {:>11} {:>7}",
+            truncate(&variant.title, 44),
+            number(variant.used_listings),
+            variant
+                .used_from
+                .map(|value| price(value, currency))
+                .unwrap_or_else(|| "—".into()),
+            sold,
+            number(variant.sales),
+        );
+    }
+    println!();
+    println!(
+        "  {}",
+        style.dim("Sold is the last year where a version has that much history, else all of it.")
+    );
+    println!(
+        "  {}",
+        style.dim("Price one exactly:  gearprice price --model-id <ID>")
+    );
+    for variant in report.variants.iter().take(3) {
+        println!(
+            "  {}",
+            style.dim(&format!(
+                "  {:<10} {}",
+                variant.id,
+                truncate(&variant.title, 58)
+            ))
+        );
+    }
+    print_usage(&report.diagnostics, style);
+}
+
+pub fn print_variants_csv(report: &VariantReport) -> Result<()> {
+    let mut writer = csv::Writer::from_writer(io::stdout().lock());
+    writer.write_record([
+        "id",
+        "title",
+        "currency",
+        "used_listings",
+        "new_listings",
+        "asking_from",
+        "sold_median",
+        "sold_recent_median",
+        "sales",
+        "url",
+    ])?;
+    for variant in &report.variants {
+        writer.write_record([
+            variant.id.to_string(),
+            neutralize(&variant.title),
+            report.currency.clone(),
+            variant.used_listings.to_string(),
+            variant.new_listings.to_string(),
+            variant
+                .used_from
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_default(),
+            variant
+                .sold_median
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_default(),
+            variant
+                .sold_recent_median
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_default(),
+            variant.sales.to_string(),
+            variant.url.clone(),
+        ])?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 /// One listing, judged. The answer goes first, because it is the only thing being asked.

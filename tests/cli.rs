@@ -127,7 +127,12 @@ fn handle(mut stream: TcpStream, state: &State, hits: &AtomicU32, rate_limit_fir
     }
 
     let (routes, inventory, honour_condition) = state;
-    let body = if path.starts_with("/listings") && !inventory.is_empty() {
+    // `/listings/95521465` is one listing; `/listings?...` and `/listings/all?...` are
+    // searches. Only the searches go to the inventory.
+    let is_single_listing = path
+        .strip_prefix("/listings/")
+        .is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()));
+    let body = if path.starts_with("/listings") && !is_single_listing && !inventory.is_empty() {
         Some(listings_response(&path, inventory, *honour_condition).to_string())
     } else {
         routes
@@ -139,6 +144,19 @@ fn handle(mut stream: TcpStream, state: &State, hits: &AtomicU32, rate_limit_fir
             .max_by_key(|(pattern, _)| pattern.len())
             .map(|(_, body)| body.to_string())
     };
+
+    // A route can ask for a failure instead of a body, so a test can put the API into a
+    // state a missing route no longer produces.
+    if let Some(body) = &body
+        && let Ok(value) = serde_json::from_str::<Value>(body)
+        && let Some(status) = value.get("__status").and_then(Value::as_u64)
+    {
+        let _ = stream.write_all(
+            format!("HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        );
+        return;
+    }
 
     let response = match body {
         Some(body) => format!(
@@ -317,6 +335,20 @@ fn inventory(count: i64, low: i64, high: i64) -> Vec<Item> {
 /// The canned responses every test needs: the catalogue model and the category tree.
 fn catalogue_routes(used_total: i64) -> HashMap<String, Value> {
     let mut routes = HashMap::new();
+    // The model fetched by id, which is how --model-id and a pasted address arrive.
+    routes.insert(
+        "/comparison_shopping_pages/".to_string(),
+        json!({
+            "id": 104713,
+            "slug": "gibson-les-paul-standard-60s",
+            "title": "Gibson Les Paul Standard '60s",
+            "brand": {"name": "Gibson"},
+            "used_total": used_total,
+            "new_total": 0,
+            "root_category_slug": "electric-guitars",
+            "_links": {"listings": {"href": "https://api.reverb.com/api/listings/all?cp_ids%5B%5D=219711"}}
+        }),
+    );
     routes.insert(
         "/shipping/regions".to_string(),
         json!({"shipping_regions": [
@@ -419,7 +451,9 @@ fn sold_routes(paid: &[i64]) -> (String, Value) {
         })
         .collect();
     (
-        "/transactions".to_string(),
+        // Both fragments, so this beats the plain by-id model route on a transactions
+        // path while losing to it on the model's own.
+        "/comparison_shopping_pages/&/transactions".to_string(),
         json!({"total": paid.len(), "total_pages": 1, "transactions": transactions}),
     )
 }
@@ -944,8 +978,13 @@ fn a_model_with_no_sold_record_falls_back_to_asking_and_says_so() {
 
 #[test]
 fn a_sold_history_that_cannot_be_read_costs_the_sold_section_and_nothing_else() {
-    // No /transactions route at all, so the stub 404s it the way a moved endpoint would.
-    let stub = Stub::start(inventory(60, 200_000, 300_000), catalogue_routes(60), 0);
+    // The transactions endpoint failing outright, the way a moved or broken one would.
+    let mut routes = catalogue_routes(60);
+    routes.insert(
+        "/comparison_shopping_pages/&/transactions".to_string(),
+        json!({"__status": 500}),
+    );
+    let stub = Stub::start(inventory(60, 200_000, 300_000), routes, 0);
     let report = json_of(&stub.run(&["price", "Les Paul", "--format", "json"]));
 
     // The live market is still measured and still reported.
@@ -980,6 +1019,98 @@ fn too_few_sales_are_quoted_but_not_cut_into_bands() {
             .contains("too few to cut into bands")),
         "{warnings:?}"
     );
+}
+
+#[test]
+fn a_pasted_listing_address_is_judged_against_what_the_model_sells_for() {
+    let mut routes = catalogue_routes(40);
+    let (path, sales) = sold_routes(&[
+        150_000, 155_000, 160_000, 165_000, 170_000, 175_000, 180_000, 185_000, 190_000, 200_000,
+    ]);
+    routes.insert(path, sales);
+    routes.insert(
+        "/listings/95521465".to_string(),
+        json!({
+            "id": 95_521_465,
+            "title": "1969 Marshall Major 200 Watt Amp",
+            "condition": {"slug": "very-good", "display_name": "Very Good"},
+            "price": {"amount_cents": 250_000, "currency": "USD"},
+            "_links": {
+                "web": {"href": "https://reverb.com/item/95521465-1969-marshall-major"},
+                "comparison_shopping": {
+                    "href": "https://api.reverb.com/api/comparison_shopping_pages/104713"
+                }
+            }
+        }),
+    );
+    let stub = Stub::start(inventory(40, 200_000, 300_000), routes, 0);
+    let report = json_of(&stub.run(&[
+        "deal",
+        "https://reverb.com/item/95521465-1969-marshall-major",
+        "--format",
+        "json",
+    ]));
+
+    assert_eq!(2_500.0, report["verdict"]["price"]);
+    // $2,500 against sales topping out at $2,000 is above everything anyone paid.
+    assert_eq!("premium", report["verdict"]["band"]);
+    assert_eq!("sold", report["verdict"]["basis"]);
+    assert!(report["verdict"]["against_median"].as_f64().unwrap() > 0.0);
+    assert_eq!(104_713, report["model"]["id"]);
+}
+
+#[test]
+fn a_listing_reverb_never_matched_to_a_model_says_so_rather_than_guessing() {
+    let mut routes = catalogue_routes(40);
+    routes.insert(
+        "/listings/777".to_string(),
+        json!({
+            "id": 777,
+            "title": "Homemade fuzz pedal in a soap tin",
+            "condition": {"slug": "good", "display_name": "Good"},
+            "price": {"amount_cents": 5_000, "currency": "USD"}
+        }),
+    );
+    let stub = Stub::start(inventory(40, 200_000, 300_000), routes, 0);
+    let output = stub.run(&["deal", "777"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("not matched"), "{error}");
+}
+
+#[test]
+fn versions_of_a_model_are_compared_by_what_each_one_sells_for() {
+    let mut routes = catalogue_routes(40);
+    routes.insert(
+        "/csps".to_string(),
+        json!({"total": 2, "comparison_shopping_pages": [
+            {"id": 137981, "slug": "guitar", "title": "Marshall JMP Model 1967 Major Guitar Amp",
+             "brand": {"name": "Marshall"}, "used_total": 6, "new_total": 0,
+             "root_category_slug": "electric-guitars",
+             "used_low_price": {"amount_cents": 430_000, "currency": "USD"},
+             "_links": {"listings": {"href": "https://api.reverb.com/api/listings?cp_ids%5B%5D=1"}}},
+            {"id": 137984, "slug": "bass", "title": "Marshall JMP Model 1978 Major Bass Amp",
+             "brand": {"name": "Marshall"}, "used_total": 1, "new_total": 0,
+             "root_category_slug": "electric-guitars",
+             "used_low_price": {"amount_cents": 399_000, "currency": "USD"},
+             "_links": {"listings": {"href": "https://api.reverb.com/api/listings?cp_ids%5B%5D=2"}}}
+        ]}),
+    );
+    let (path, sales) = sold_routes(&[400_000, 410_000, 420_000]);
+    routes.insert(path, sales);
+    let stub = Stub::start(inventory(40, 200_000, 300_000), routes, 0);
+    let report = json_of(&stub.run(&["variants", "Marshall Major", "--format", "json"]));
+
+    let variants = report["variants"].as_array().unwrap();
+    assert_eq!(2, variants.len());
+    // Each carries what it sells for, which is the column that separates them.
+    assert!(
+        variants
+            .iter()
+            .all(|variant| variant["sold_median"].is_number())
+    );
+    assert!(variants.iter().any(|variant| variant["id"] == 137_981));
+    assert!(variants.iter().any(|variant| variant["id"] == 137_984));
 }
 
 #[test]

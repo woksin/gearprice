@@ -18,6 +18,11 @@ All notable changes to this project are documented here. The format follows
 - `gearprice deal <url>` — paste a Reverb listing address, or give a listing id, and get a
   verdict on that listing against what the model actually sells for, with the offer that
   would be the usual discount off its ask. `price` accepts addresses too.
+- `gearprice variants` — every version of a model side by side, with what each one sells
+  for. Marshall's guitar Major and bass Major are both 200-watt "Majors" and one sells for
+  half again what the other does.
+- `gearprice completions <shell>`, and the first argument may be the gear itself, so
+  `gearprice "les paul"` is `gearprice price "les paul"`.
 - Thin catalogue markets are widened with a text search, keeping only listings that
   genuinely describe the same model, and saying how many the widening added.
 - `--strict` to refuse the widening.

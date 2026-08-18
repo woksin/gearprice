@@ -25,6 +25,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
+use rayon::prelude::*;
 
 use classify::{Band, Bands, SEGMENT_PERCENTILES, place, segment_ladder};
 use history::{History, Movement, Snapshot, Subject};
@@ -37,6 +38,7 @@ use report::{
     AlternativeModel, AskingVerdict, BandTable, ClassReport, ClassRow, ClassSummary, DealReport,
     Diagnostics, ListingReport, ListingSummary, MarketSummary, ModelReport, ModelRow, ModelSummary,
     PriceReport, Reading, SOURCE, SoldSummary, TrackReport, TrackedReport, TrackedSubject,
+    VariantReport, VariantRow,
 };
 use reverb::{CatalogueModel, Client, DEFAULT_REQUEST_BUDGET, MAX_PER_PAGE};
 use shipping::Regions;
@@ -115,8 +117,12 @@ enum Command {
     Categories,
     /// Judge one listing: paste its Reverb address, or give its id
     Deal(Box<DealArguments>),
+    /// Compare every version of a model — eras, guitar against bass, each run
+    Variants(VariantsArguments),
     /// Record what a market costs today, and show what it has done since
     Track(Box<TrackArguments>),
+    /// Print a shell completion script
+    Completions(CompletionArguments),
     /// Inspect or empty the response cache
     Cache(CacheArguments),
     /// Check for and install a newer gearprice release
@@ -245,6 +251,20 @@ struct ClassesArguments {
 }
 
 #[derive(Debug, Args)]
+struct VariantsArguments {
+    #[arg(value_name = "QUERY", num_args = 1..)]
+    query: Vec<String>,
+
+    /// How many versions to compare.
+    #[arg(long, default_value_t = 8, value_name = "N")]
+    limit: u32,
+
+    /// How many recent sales to read for each.
+    #[arg(long, default_value_t = 50, value_name = "N")]
+    sold_sample: u32,
+}
+
+#[derive(Debug, Args)]
 struct DealArguments {
     /// A reverb.com listing address, or a listing id.
     #[arg(value_name = "LISTING")]
@@ -284,6 +304,13 @@ struct TrackArguments {
 }
 
 #[derive(Debug, Args)]
+struct CompletionArguments {
+    /// Which shell to generate for.
+    #[arg(value_enum)]
+    shell: clap_complete::Shell,
+}
+
+#[derive(Debug, Args)]
 struct CacheArguments {
     /// Delete every cached response.
     #[arg(long)]
@@ -304,13 +331,45 @@ fn main() {
     }
 }
 
+/// Lets the first argument be the gear itself: `gearprice "les paul"` rather than
+/// `gearprice price "les paul"`.
+///
+/// Only when it is the *first* argument, and only when it is not a flag. Anything else
+/// would have to know which options take values, and `gearprice --currency NOK price ...`
+/// would start pricing `NOK`.
+fn with_default_command(arguments: impl Iterator<Item = String>) -> Vec<String> {
+    let mut arguments: Vec<String> = arguments.collect();
+    let definition = <Cli as clap::CommandFactory>::command();
+    let known: Vec<&str> = definition
+        .get_subcommands()
+        .flat_map(|command| std::iter::once(command.get_name()).chain(command.get_all_aliases()))
+        .collect();
+    let takes_default = arguments
+        .get(1)
+        .is_some_and(|first| !first.starts_with('-') && !known.contains(&first.as_str()));
+    if takes_default {
+        arguments.insert(1, "price".to_string());
+    }
+    arguments
+}
+
 fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(with_default_command(std::env::args()));
     let style = Style::new(cli.no_color);
 
     match &cli.command {
         Command::Update(arguments) => return run_update(arguments),
         Command::Cache(arguments) => return run_cache(arguments, &cli),
+        Command::Completions(arguments) => {
+            let mut command = <Cli as clap::CommandFactory>::command();
+            clap_complete::generate(
+                arguments.shell,
+                &mut command,
+                "gearprice",
+                &mut std::io::stdout(),
+            );
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -323,9 +382,12 @@ fn run() -> Result<()> {
         Command::Listings(arguments) => run_listings(&cli, arguments, &client, &progress, style),
         Command::Classes(arguments) => run_classes(&cli, arguments, &client, &progress, style),
         Command::Deal(arguments) => run_deal(&cli, arguments, &client, &progress, style),
+        Command::Variants(arguments) => run_variants(&cli, arguments, &client, &progress, style),
         Command::Track(arguments) => run_track(&cli, arguments, &client, &progress, style),
         Command::Categories => run_categories(&cli, &client, &progress, style),
-        Command::Cache(_) | Command::Update(_) => unreachable!("handled above"),
+        Command::Cache(_) | Command::Update(_) | Command::Completions(_) => {
+            unreachable!("handled above")
+        }
     };
     progress.finish();
     result
@@ -1057,6 +1119,89 @@ fn run_classes(
     Ok(())
 }
 
+/// Compares every catalogue entry in a family.
+///
+/// Reverb splits a model by era and by variant, and the differences are not cosmetic:
+/// Marshall's guitar Major is Model 1967 and the bass Major is Model 1978, both called
+/// "Major", both 200 watts, and their markets are nothing alike. Pricing one when you
+/// hold the other is an easy and expensive mistake.
+fn run_variants(
+    cli: &Cli,
+    arguments: &VariantsArguments,
+    client: &Client,
+    progress: &Progress,
+    style: Style,
+) -> Result<()> {
+    let words = arguments.query.join(" ").trim().to_string();
+    if words.is_empty() {
+        bail!("say which model to compare versions of");
+    }
+    progress.set("Finding the versions");
+    let resolution = resolve::resolve(client, &words, arguments.limit.min(MAX_PER_PAGE))?;
+    let mut warnings = Vec::new();
+    if let Some(reading) = &resolution.interpreted_as {
+        warnings.push(format!("read {words:?} as {reading:?}"));
+    }
+    let models: Vec<CatalogueModel> = resolution
+        .ranked
+        .into_iter()
+        .take(arguments.limit as usize)
+        .collect();
+    if models.is_empty() {
+        bail!("nothing in Reverb's catalogue matches {words:?}");
+    }
+
+    progress.set("Reading what each has sold for");
+    let currency = client.currency().to_string();
+    let sold: Vec<Option<sold::Sold>> = models
+        .par_iter()
+        .map(|model| sold::read(client, model.id, arguments.sold_sample).ok())
+        .collect();
+
+    let variants: Vec<VariantRow> = models
+        .iter()
+        .zip(sold)
+        .map(|(model, sold)| {
+            let sold = sold.filter(|history| !history.is_empty());
+            VariantRow {
+                id: model.id,
+                title: model.title.clone(),
+                used_listings: model.used_total,
+                new_listings: model.new_total,
+                used_from: model
+                    .used_low_price
+                    .as_ref()
+                    .map(|price| Money::from_minor(price.amount_cents).major(&currency)),
+                sold_median: sold
+                    .as_ref()
+                    .and_then(sold::Sold::median)
+                    .map(|price| price.major(&currency)),
+                sold_recent_median: sold
+                    .as_ref()
+                    .and_then(|history| history.recent_median)
+                    .map(|price| price.major(&currency)),
+                sales: sold.as_ref().map(|history| history.recorded).unwrap_or(0),
+                url: model.web_url(),
+            }
+        })
+        .collect();
+
+    let report = VariantReport {
+        query: words,
+        source: SOURCE,
+        generated_at: timestamp(),
+        currency,
+        variants,
+        diagnostics: Diagnostics::from(client.usage(), warnings),
+    };
+    match cli.format {
+        Format::Json => output::print_json(&report)?,
+        Format::Csv => output::print_variants_csv(&report)?,
+        Format::Table => output::print_variants(&report, style),
+    }
+    Ok(())
+}
+
 /// Judges one listing against what its model actually sells for.
 fn run_deal(
     cli: &Cli,
@@ -1365,6 +1510,33 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use classify::Segment;
+
+    #[test]
+    fn the_gear_can_come_first_without_naming_the_command() {
+        let filled = |arguments: &[&str]| {
+            with_default_command(arguments.iter().map(|value| value.to_string()))
+        };
+        assert_eq!(
+            vec!["gearprice", "price", "les paul"],
+            filled(&["gearprice", "les paul"])
+        );
+        // A subcommand is left alone, aliases included.
+        assert_eq!(
+            vec!["gearprice", "models", "les paul"],
+            filled(&["gearprice", "models", "les paul"])
+        );
+        assert_eq!(
+            vec!["gearprice", "search", "les paul"],
+            filled(&["gearprice", "search", "les paul"])
+        );
+        // So is anything starting with a flag, because working out where the query is
+        // would mean knowing which options take a value.
+        assert_eq!(
+            vec!["gearprice", "--help"],
+            filled(&["gearprice", "--help"])
+        );
+        assert_eq!(vec!["gearprice"], filled(&["gearprice"]));
+    }
 
     #[test]
     fn the_command_line_is_internally_consistent() {
