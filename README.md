@@ -282,6 +282,39 @@ gearprice listings "Boss DS-1" --deals
 Every listing carries the band it falls in, so `--deals` means "below the going rate for
 this model" rather than "cheap-sounding".
 
+### `gearprice track` — what a market has done since
+
+Every other command is a photograph. What a guitar cost in March is not recoverable from
+Reverb afterwards at any price, so the only way to know whether a market is moving is to
+have written it down at the time.
+
+```bash
+gearprice track "Gibson Les Paul Standard 60s"     # take a reading
+gearprice track "..." --no-record                  # look without adding one
+gearprice track --list                             # everything being tracked
+```
+
+```
+  Tracking              5 readings · used · USD
+
+  Median                    $2,223  down $177 (7.4%) since 2026-03-11
+  Listings                     174  -24 on the market since then
+
+Readings
+  When               Median   Listings   Typical wait
+  ────────────────────────────────────────────────────
+  2026-03-11         $2,400        198        70 days
+  2026-05-15         $2,350        190        53 days
+  2026-07-09         $2,280        181        40 days
+  2026-08-18         $2,223        174        42 days  ← now
+```
+
+Readings are appended to `~/.local/share/gearprice/history.jsonl`, one JSON object per
+line — kept with your data rather than in the cache, because emptying the cache must not
+throw away the one thing that cannot be fetched again. A reading is only ever compared
+against others of the same question: same currency, same condition, same destination. A
+median in kroner beside one in dollars is not a price movement.
+
 ### `gearprice categories` — the category tree
 
 Slugs for `--category` and for `gearprice classes`. Either a top-level slug
@@ -389,6 +422,7 @@ reporting the wrong population.
 |---|---|
 | `GEARPRICE_CURRENCY` | Default display currency |
 | `GEARPRICE_SHIPS_TO` | Default shipping destination |
+| `GEARPRICE_HISTORY` | Tracking history file. Defaults to `$XDG_DATA_HOME/gearprice/history.jsonl` or `~/.local/share/gearprice/history.jsonl` |
 | `GEARPRICE_CACHE_DIR` | Cache location. Defaults to `$XDG_CACHE_HOME/gearprice` or `~/.cache/gearprice` |
 | `GEARPRICE_CACHE_TTL` | Default cache lifetime in minutes |
 | `GEARPRICE_NO_PROGRESS` | Suppress the spinner |

@@ -2,6 +2,7 @@
 
 mod cache;
 mod classify;
+mod history;
 mod market;
 mod money;
 mod output;
@@ -23,6 +24,7 @@ use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 
 use classify::{Band, Bands, SEGMENT_PERCENTILES, place, segment_ladder};
+use history::{History, Movement, Snapshot, Subject};
 use market::{Market, measure, measure_at};
 use money::Money;
 use output::{Format, Style};
@@ -31,7 +33,7 @@ use query::{Condition, Search, Sort};
 use report::{
     AlternativeModel, AskingVerdict, BandTable, ClassReport, ClassRow, ClassSummary, Diagnostics,
     ListingReport, ListingSummary, MarketSummary, ModelReport, ModelRow, ModelSummary, PriceReport,
-    SOURCE,
+    Reading, SOURCE, TrackReport, TrackedReport, TrackedSubject,
 };
 use reverb::{CatalogueModel, Client, DEFAULT_REQUEST_BUDGET, MAX_PER_PAGE};
 use shipping::Regions;
@@ -108,6 +110,8 @@ enum Command {
     Classes(ClassesArguments),
     /// Show Reverb's category tree, for --category
     Categories,
+    /// Record what a market costs today, and show what it has done since
+    Track(Box<TrackArguments>),
     /// Inspect or empty the response cache
     Cache(CacheArguments),
     /// Check for and install a newer gearprice release
@@ -224,6 +228,31 @@ struct ClassesArguments {
 }
 
 #[derive(Debug, Args)]
+struct TrackArguments {
+    /// The gear to record. Omit with --list to see everything already tracked.
+    #[arg(value_name = "QUERY", num_args = 0..)]
+    query: Vec<String>,
+
+    /// Show everything the history has readings of, and record nothing.
+    #[arg(long, conflicts_with_all = ["query", "no_record"])]
+    list: bool,
+
+    /// Report the history without adding a reading to it.
+    #[arg(long)]
+    no_record: bool,
+
+    #[arg(long, value_name = "ID")]
+    model_id: Option<u64>,
+
+    /// Search the words given rather than resolving them to a catalogue model.
+    #[arg(long, conflicts_with = "model_id")]
+    raw: bool,
+
+    #[command(flatten)]
+    filters: Filters,
+}
+
+#[derive(Debug, Args)]
 struct CacheArguments {
     /// Delete every cached response.
     #[arg(long)]
@@ -262,6 +291,7 @@ fn run() -> Result<()> {
         Command::Models(arguments) => run_models(&cli, arguments, &client, &progress, style),
         Command::Listings(arguments) => run_listings(&cli, arguments, &client, &progress, style),
         Command::Classes(arguments) => run_classes(&cli, arguments, &client, &progress, style),
+        Command::Track(arguments) => run_track(&cli, arguments, &client, &progress, style),
         Command::Categories => run_categories(&cli, &client, &progress, style),
         Command::Cache(_) | Command::Update(_) => unreachable!("handled above"),
     };
@@ -749,6 +779,118 @@ fn run_classes(
         Format::Table => output::print_classes(&report, style),
         Format::Json => output::print_json(&report)?,
         Format::Csv => output::print_classes_csv(&report)?,
+    }
+    Ok(())
+}
+
+fn run_track(
+    cli: &Cli,
+    arguments: &TrackArguments,
+    client: &Client,
+    progress: &Progress,
+    style: Style,
+) -> Result<()> {
+    let history = History::new(history::default_path());
+    if arguments.list {
+        let report = TrackedReport {
+            history: history.path().display().to_string(),
+            tracked: history
+                .subjects()?
+                .into_iter()
+                .map(|(subject, readings, last)| TrackedSubject {
+                    title: subject.title,
+                    model_id: subject.model_id,
+                    currency: subject.currency,
+                    condition: subject.condition.label().to_string(),
+                    ships_to: subject.ships_to,
+                    readings,
+                    last_recorded: last.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                })
+                .collect(),
+        };
+        match cli.format {
+            Format::Json => output::print_json(&report)?,
+            _ => output::print_tracked(&report, style),
+        }
+        return Ok(());
+    }
+
+    let words = arguments.query.join(" ").trim().to_string();
+    if words.is_empty() && arguments.model_id.is_none() {
+        bail!("say what to track, or pass --list to see what already is");
+    }
+    let mut warnings = Vec::new();
+
+    progress.set("Resolving the model");
+    let resolution = resolve_model(
+        client,
+        arguments.model_id,
+        arguments.raw,
+        &words,
+        &mut warnings,
+    )?;
+    let model = resolution.chosen.clone();
+
+    let mut search = match &model {
+        Some(model) if !model.product_ids().is_empty() => Search::products(model.product_ids()),
+        Some(model) => Search::text(model.title.clone()),
+        None => Search::text(words.clone()),
+    };
+    apply_filters(&mut search, &arguments.filters, client)?;
+    taxonomy::require_targeted(&search)?;
+
+    progress.set("Measuring the market");
+    let market = measure(client, &search)?;
+    warnings.extend(market.warnings.iter().cloned());
+    if market.is_empty() {
+        bail!("nothing is listed, so there is no reading to record");
+    }
+
+    let subject = Subject {
+        model_id: model.as_ref().map(|model| model.id),
+        title: model
+            .as_ref()
+            .map(|model| model.title.clone())
+            .unwrap_or_else(|| words.clone()),
+        currency: market.currency.clone(),
+        condition: arguments.filters.condition,
+        ships_to: search.ships_to.clone(),
+    };
+    let snapshot = Snapshot::of(subject.clone(), &market);
+    if !arguments.no_record {
+        history.record(&snapshot)?;
+    }
+
+    let mut readings = history.readings_of(&subject)?;
+    if arguments.no_record {
+        // Shown alongside the past, without joining it.
+        readings.push(snapshot);
+    }
+    let movement = Movement::between(&readings);
+    if readings.len() < 2 {
+        warnings
+            .push("first reading of this market — run this again in a week to see it move".into());
+    }
+
+    let report = TrackReport {
+        query: if words.is_empty() {
+            subject.title.clone()
+        } else {
+            words
+        },
+        source: SOURCE,
+        generated_at: timestamp(),
+        currency: market.currency.clone(),
+        condition: arguments.filters.condition.label().to_string(),
+        model: model.as_ref().map(ModelSummary::of),
+        recorded: !arguments.no_record,
+        readings: readings.iter().map(Reading::of).collect(),
+        movement,
+        diagnostics: Diagnostics::from(client.usage(), warnings),
+    };
+    match cli.format {
+        Format::Json => output::print_json(&report)?,
+        _ => output::print_track(&report, style),
     }
     Ok(())
 }

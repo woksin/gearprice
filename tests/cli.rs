@@ -78,16 +78,23 @@ impl Stub {
     }
 
     fn run(&self, arguments: &[&str]) -> Output {
-        Command::new(binary())
+        self.run_with_history(arguments, None)
+    }
+
+    fn run_with_history(&self, arguments: &[&str], history: Option<&std::path::Path>) -> Output {
+        let mut command = Command::new(binary());
+        command
             .args(arguments)
             .env("GEARPRICE_API_ROOT", &self.address)
             .env("GEARPRICE_NO_PROGRESS", "1")
             .env("NO_COLOR", "1")
             // A cache would make a second run in the same test answer from disk and hide
             // whatever the stub was set up to say.
-            .args(["--no-cache"])
-            .output()
-            .expect("run gearprice")
+            .args(["--no-cache"]);
+        if let Some(history) = history {
+            command.env("GEARPRICE_HISTORY", history);
+        }
+        command.output().expect("run gearprice")
     }
 }
 
@@ -785,6 +792,73 @@ fn a_destination_reverb_does_not_know_is_refused_rather_than_ignored() {
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("not a shipping destination"), "{error}");
+}
+
+#[test]
+fn tracking_accumulates_readings_and_reports_what_moved() {
+    let directory = tempfile::tempdir().unwrap();
+    let history = directory.path().join("history.jsonl");
+
+    // A market, recorded.
+    let first = Stub::start(inventory(80, 200_000, 400_000), catalogue_routes(80), 0);
+    let report = json_of(
+        &first.run_with_history(&["track", "Les Paul", "--format", "json"], Some(&history)),
+    );
+    assert_eq!(1, report["readings"].as_array().unwrap().len());
+    assert!(report["recorded"].as_bool().unwrap());
+    // One reading is a starting point, not a movement.
+    assert!(report["movement"].is_null());
+
+    // The same market a while later, cheaper and thinner.
+    let later = Stub::start(inventory(60, 180_000, 360_000), catalogue_routes(60), 0);
+    let report = json_of(
+        &later.run_with_history(&["track", "Les Paul", "--format", "json"], Some(&history)),
+    );
+    let readings = report["readings"].as_array().unwrap();
+    assert_eq!(2, readings.len(), "the first reading should still be there");
+
+    let movement = &report["movement"];
+    assert_eq!(80, movement["listings_then"]);
+    assert_eq!(60, movement["listings_now"]);
+    assert!(
+        movement["median_now"].as_f64().unwrap() < movement["median_then"].as_f64().unwrap(),
+        "the market got cheaper and the record should say so"
+    );
+}
+
+#[test]
+fn a_reading_is_only_compared_against_the_same_question() {
+    let directory = tempfile::tempdir().unwrap();
+    let history = directory.path().join("history.jsonl");
+    let stub = Stub::start(inventory(80, 200_000, 400_000), catalogue_routes(80), 0);
+
+    stub.run_with_history(&["track", "Les Paul", "--format", "json"], Some(&history));
+    // Same gear, different currency: not this market moving, a different question.
+    let report = json_of(&stub.run_with_history(
+        &["track", "Les Paul", "--currency", "EUR", "--format", "json"],
+        Some(&history),
+    ));
+    assert_eq!(1, report["readings"].as_array().unwrap().len());
+    assert!(report["movement"].is_null());
+
+    // Both are tracked, separately.
+    let listed =
+        json_of(&stub.run_with_history(&["track", "--list", "--format", "json"], Some(&history)));
+    assert_eq!(2, listed["tracked"].as_array().unwrap().len());
+}
+
+#[test]
+fn a_reading_can_be_seen_without_being_written_down() {
+    let directory = tempfile::tempdir().unwrap();
+    let history = directory.path().join("history.jsonl");
+    let stub = Stub::start(inventory(80, 200_000, 400_000), catalogue_routes(80), 0);
+
+    let report = json_of(&stub.run_with_history(
+        &["track", "Les Paul", "--no-record", "--format", "json"],
+        Some(&history),
+    ));
+    assert!(!report["recorded"].as_bool().unwrap());
+    assert!(!history.exists(), "--no-record wrote to the history anyway");
 }
 
 #[test]

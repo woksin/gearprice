@@ -8,6 +8,7 @@
 use serde::Serialize;
 
 use crate::classify::{Band, Bands, Placement, Segment};
+use crate::history::{Movement, Snapshot};
 use crate::market::Market;
 use crate::money::Money;
 use crate::reverb::{CatalogueModel, Listing, Usage};
@@ -399,6 +400,66 @@ pub struct ClassRow {
     pub to: Option<f64>,
     pub share: f64,
     pub description: String,
+}
+
+/// What a market has done since it was first recorded.
+#[derive(Debug, Serialize)]
+pub struct TrackReport {
+    pub query: String,
+    pub source: &'static str,
+    pub generated_at: String,
+    pub currency: String,
+    pub condition: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelSummary>,
+    pub recorded: bool,
+    pub readings: Vec<Reading>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub movement: Option<Movement>,
+    pub diagnostics: Diagnostics,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Reading {
+    pub recorded_at: String,
+    pub listings: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median_days_listed: Option<i64>,
+}
+
+impl Reading {
+    pub fn of(snapshot: &Snapshot) -> Self {
+        Self {
+            recorded_at: snapshot
+                .recorded_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            listings: snapshot.listings,
+            median: snapshot.median(),
+            median_days_listed: snapshot.median_days_listed,
+        }
+    }
+}
+
+/// Everything the history knows about, for `track --list`.
+#[derive(Debug, Serialize)]
+pub struct TrackedReport {
+    pub history: String,
+    pub tracked: Vec<TrackedSubject>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrackedSubject {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<u64>,
+    pub currency: String,
+    pub condition: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ships_to: Option<String>,
+    pub readings: usize,
+    pub last_recorded: String,
 }
 
 /// Live listings, band-labelled.

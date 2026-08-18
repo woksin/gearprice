@@ -12,6 +12,7 @@ use crate::classify::{Band, Segment};
 use crate::money::{self, Money};
 use crate::report::{
     BandTable, ClassReport, ListingReport, ListingSummary, ModelReport, PriceReport, SOURCE_SHORT,
+    TrackReport, TrackedReport,
 };
 
 const RULE_WIDTH: usize = 92;
@@ -623,6 +624,123 @@ fn print_usage(diagnostics: &crate::report::Diagnostics, style: Style) {
     );
 }
 
+pub fn print_track(report: &TrackReport, style: Style) {
+    let currency = report.currency.as_str();
+    let heading = report
+        .model
+        .as_ref()
+        .map(|model| model.title.clone())
+        .unwrap_or_else(|| report.query.clone());
+    println!("{}", style.bold(&format!("GEARPRICE  {heading}")));
+    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    println!(
+        "  {:<21} {} · {} · {}",
+        "Tracking",
+        plural(report.readings.len(), "reading"),
+        report.condition,
+        currency
+    );
+    if !report.recorded {
+        println!(
+            "  {:<21} {}",
+            "",
+            style.dim("today's reading is shown but was not recorded (--no-record)")
+        );
+    }
+    print_warnings(&report.diagnostics, style);
+
+    if let Some(movement) = &report.movement {
+        println!();
+        let change = movement.median_change().unwrap_or_default();
+        let share = movement.median_change_share().unwrap_or_default();
+        let direction = if change < 0.0 { "down" } else { "up" };
+        let colour = if change < 0.0 { "32" } else { "31" };
+        println!(
+            "  {:<21} {:>10}  {}",
+            "Median",
+            price(movement.median_now.unwrap_or_default(), currency),
+            style.paint(
+                colour,
+                &format!(
+                    "{direction} {} ({:.1}%) since {}",
+                    price(change.abs(), currency),
+                    share.abs() * 100.0,
+                    local_date(&movement.since.to_rfc3339())
+                )
+            )
+        );
+        let listings = i64::from(movement.listings_now) - i64::from(movement.listings_then);
+        println!(
+            "  {:<21} {:>10}  {}",
+            "Listings",
+            number(movement.listings_now),
+            style.dim(&format!("{listings:+} on the market since then"))
+        );
+    }
+
+    println!();
+    println!("{}", style.bold("Readings"));
+    println!(
+        "  {:<12} {:>12} {:>10} {:>14}",
+        "When", "Median", "Listings", "Typical wait"
+    );
+    println!("  {}", style.dim(&"─".repeat(52)));
+    let last = report.readings.len().saturating_sub(1);
+    for (index, reading) in report.readings.iter().enumerate() {
+        println!(
+            "  {:<12} {:>12} {:>10} {:>14}{}",
+            local_date(&reading.recorded_at),
+            reading
+                .median
+                .map(|median| price(median, currency))
+                .unwrap_or_else(|| "—".into()),
+            number(reading.listings),
+            reading
+                .median_days_listed
+                .map(days)
+                .unwrap_or_else(|| "—".into()),
+            if index == last {
+                style.dim("  ← now")
+            } else {
+                String::new()
+            }
+        );
+    }
+    print_usage(&report.diagnostics, style);
+}
+
+pub fn print_tracked(report: &TrackedReport, style: Style) {
+    println!("{}", style.bold("GEARPRICE  what is being tracked"));
+    println!("{}", style.dim(&"═".repeat(RULE_WIDTH)));
+    if report.tracked.is_empty() {
+        println!("  Nothing yet. `gearprice track \"<gear>\"` takes the first reading.");
+        println!("  {}", style.dim(&report.history));
+        return;
+    }
+    println!(
+        "  {:<44} {:>9} {:>9} {:>8} {:>12}",
+        "Model", "Currency", "Condition", "Readings", "Last read"
+    );
+    println!("  {}", style.dim(&"─".repeat(RULE_WIDTH - 2)));
+    for subject in &report.tracked {
+        println!(
+            "  {:<44} {:>9} {:>9} {:>8} {:>12}",
+            truncate(&subject.title, 44),
+            subject.currency,
+            truncate(&subject.condition, 9),
+            number(subject.readings as u32),
+            local_date(&subject.last_recorded)
+        );
+    }
+    println!();
+    println!("  {}", style.dim(&report.history));
+}
+
+/// A timestamp as a plain date, for a column a person reads.
+fn local_date(timestamp: &str) -> String {
+    timestamp.split('T').next().unwrap_or(timestamp).to_string()
+}
+
 // ---------------------------------------------------------------------------
 // CSV
 // ---------------------------------------------------------------------------
@@ -838,6 +956,15 @@ fn price_range(from: Option<f64>, to: Option<f64>, currency: &str, coarse: bool)
     }
 }
 
+/// `1 reading`, `6 readings`.
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{} {noun}s", number(count as u32))
+    }
+}
+
 fn percent(share: f64) -> String {
     format!("{:.0}%", share * 100.0)
 }
@@ -977,6 +1104,14 @@ mod tests {
             price_range(Some(1_495.0), Some(3_800.0), "NOK", true)
         );
         assert_eq!("—", price_range(None, None, "USD", true));
+    }
+
+    #[test]
+    fn counts_agree_with_their_nouns() {
+        assert_eq!("1 reading", plural(1, "reading"));
+        assert_eq!("6 readings", plural(6, "reading"));
+        assert_eq!("0 readings", plural(0, "reading"));
+        assert_eq!("1,200 readings", plural(1_200, "reading"));
     }
 
     #[test]

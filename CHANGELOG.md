@@ -19,6 +19,14 @@ All notable changes to this project are documented here. The format follows
 - A warning when the best catalogue match is a poor fit, rather than presenting it as the
   answer.
 - `--raw` on `listings`, matching `price`.
+- Median days on the market per price band, which is the closest thing left to evidence
+  about which asking prices are actually being paid.
+- Median asking price per condition grade, ordered best grade first, and the share of
+  sellers who accept offers.
+- `--ships-to CODE`, which narrows a market to sellers who will send there and prices the
+  listings delivered, using Reverb's own shipping region tree.
+- `gearprice track`, which records what a market costs today and reports what it has done
+  since. Readings are kept in `~/.local/share/gearprice/history.jsonl`.
 
 ### Changed
 

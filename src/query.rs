@@ -9,7 +9,7 @@
 use std::fmt;
 
 use clap::ValueEnum;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::money::Money;
 
@@ -19,7 +19,7 @@ use crate::money::Money;
 /// back on a new listing is `brand-new`, but the *filter* spelling is `new` — passing
 /// `brand-new` as a filter is one of the values it silently ignores, so it is absent here
 /// by design.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Condition {
     /// Every listing, new and used alike.
