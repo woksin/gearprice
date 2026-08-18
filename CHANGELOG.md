@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `gearprice guide` — a short walkthrough of what to type and what the numbers mean, for
+  people who have just installed it and do not want a list of eleven subcommands.
+
+### Changed
+
+- Measuring a market makes one fewer request, by not asking for a count it already has.
+- A class ladder resolves its last few prices in one round instead of walking down to them.
+
+### Added
+
 - A configuration file, so settings you would otherwise retype every run can be written
   down once. `gearprice config` shows where it lives and what is in force; `--example`
   prints a commented sample. Flags beat environment variables beat the file beats the
