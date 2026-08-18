@@ -666,6 +666,7 @@ fn run_price(
         arguments.raw,
         &words,
         cli.no_input,
+        progress,
         &mut warnings,
     )?;
     let model = resolution.chosen.clone();
@@ -907,6 +908,7 @@ fn resolve_model(
     raw: bool,
     words: &str,
     no_input: bool,
+    progress: &Progress,
     warnings: &mut Vec<String>,
 ) -> Result<resolve::Resolution> {
     // A pasted URL is not a search. Someone looking at a listing and asking about it has
@@ -955,6 +957,10 @@ fn resolve_model(
     {
         let mut offered = vec![chosen];
         offered.extend(resolution.alternatives.iter().cloned());
+        // The spinner rewrites its line several times a second, so a question asked
+        // underneath it is wiped before it can be read — and the run then blocks on stdin
+        // with nothing on screen but a spinner. Stop it before asking.
+        progress.hush();
         let picked = prompt::choose(
             &offered,
             |model| {
@@ -1278,6 +1284,7 @@ fn run_listings(
         arguments.raw || words.is_empty(),
         &words,
         cli.no_input,
+        progress,
         &mut warnings,
     )?
     .chosen;
@@ -1598,6 +1605,7 @@ fn run_track(
         arguments.raw,
         &words,
         cli.no_input,
+        progress,
         &mut warnings,
     )?;
     let model = resolution.chosen.clone();

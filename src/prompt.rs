@@ -28,6 +28,18 @@
 //! the middle of its JSON.
 
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+/// How long to wait for an answer before taking the default.
+///
+/// A question nobody answers must not become a program that never finishes. `gearprice
+/// listings "Valley Arts"` was left running for sixteen minutes on a prompt that a
+/// spinner had wiped off the screen: the spinner is fixed, but a command that blocks
+/// forever on unread input is the wrong failure whatever caused it. The default is a real
+/// answer, so waiting is a courtesy rather than a requirement.
+const PATIENCE: Duration = Duration::from_secs(60);
 
 /// How many answers to take before giving up and using the default.
 ///
@@ -58,15 +70,40 @@ pub fn choose<T>(
     // The one place the real terminal, stdin and stderr are named. Everything that decides
     // anything lives in `ask`, which can then be run without a terminal in sight.
     let is_terminal = io::stdin().is_terminal();
-    ask(
-        items,
-        label,
-        prompt,
-        allow,
-        is_terminal,
-        &mut io::stdin().lock(),
-        &mut io::stderr().lock(),
-    )
+    if !allow || !is_terminal || items.len() < 2 {
+        return Ok(None);
+    }
+
+    let rows: Vec<String> = items.iter().map(&label).collect();
+    let heading = prompt.to_string();
+    let (answered, answer) = mpsc::channel();
+
+    // Asked on another thread so an unanswered question cannot become a program that
+    // never finishes. The reading thread is left to its blocking read rather than being
+    // killed: it owns nothing the run needs, and the process ends when the report does.
+    thread::spawn(move || {
+        let outcome = ask(
+            &rows,
+            |row| row.clone(),
+            &heading,
+            true,
+            true,
+            &mut io::stdin().lock(),
+            &mut io::stderr().lock(),
+        );
+        let _ = answered.send(outcome);
+    });
+
+    match answer.recv_timeout(PATIENCE) {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            // Say so, or the report simply appears and the reader wonders what happened
+            // to the question they were part-way through reading.
+            let mut stderr = io::stderr().lock();
+            writeln!(stderr, "  No answer, going with the first.")?;
+            Ok(None)
+        }
+    }
 }
 
 /// The question itself, with the terminal, the keyboard and the screen all passed in.
@@ -168,6 +205,17 @@ mod tests {
         )
         .unwrap();
         (chosen, String::from_utf8(shown).unwrap())
+    }
+
+    #[test]
+    fn a_question_nobody_answers_does_not_become_a_program_that_never_ends() {
+        // `gearprice listings "Valley Arts"` ran for sixteen minutes on a prompt a
+        // spinner had wiped off the screen. The spinner is fixed; this makes the failure
+        // impossible rather than merely unlikely.
+        assert!(
+            PATIENCE <= Duration::from_secs(120),
+            "a minute is patience, ten is a hang"
+        );
     }
 
     #[test]
