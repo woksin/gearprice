@@ -6,8 +6,6 @@
 
 use std::io::{self, IsTerminal, Write};
 
-use anyhow::Result;
-
 use crate::classify::{Band, Basis, Segment};
 use crate::money::{self, Money};
 use crate::report::{
@@ -32,8 +30,9 @@ fn rule_width() -> usize {
         .clamp(NARROWEST, WIDEST)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
 pub enum Format {
+    #[default]
     Table,
     Json,
     Csv,
@@ -97,12 +96,9 @@ impl Style {
     }
 }
 
-pub fn print_json(value: &impl serde::Serialize) -> Result<()> {
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
-    serde_json::to_writer_pretty(&mut output, value)?;
-    writeln!(output)?;
-    Ok(())
+pub fn print_json(out: &mut impl Write, value: &impl serde::Serialize) -> io::Result<()> {
+    serde_json::to_writer_pretty(&mut *out, value)?;
+    writeln!(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +110,12 @@ pub fn print_json(value: &impl serde::Serialize) -> Result<()> {
 /// `full` restores the parts trimmed by default. The trimmed ones — the histogram above
 /// all — describe the *asking* prices, which are the secondary number now that bands come
 /// from completed sales, and the report ran to sixty lines with them in.
-pub fn print_price(report: &PriceReport, style: Style, full: bool) {
+pub fn print_price(
+    out: &mut impl Write,
+    report: &PriceReport,
+    style: Style,
+    full: bool,
+) -> io::Result<()> {
     let currency = report.currency.as_str();
     let money_of = |value: f64| money::format(Money::from_major(value, currency), currency);
 
@@ -123,8 +124,8 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
         .as_ref()
         .map(|model| model.title.clone())
         .unwrap_or_else(|| report.query.clone());
-    println!("{}", style.bold(&format!("GEARPRICE  {heading}")));
-    println!("{}", style.dim(&"═".repeat(rule_width())));
+    writeln!(out, "{}", style.bold(&format!("GEARPRICE  {heading}")))?;
+    writeln!(out, "{}", style.dim(&"═".repeat(rule_width())))?;
 
     if let Some(model) = &report.model {
         let mut parts = vec![model.brand.clone()];
@@ -132,8 +133,8 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
             parts.push(model.category.clone());
         }
         parts.retain(|part| !part.is_empty());
-        println!("  {:<21} {}", "Model", parts.join(" · "));
-        println!("  {:<21} {}", "", style.dim(&model.url));
+        writeln!(out, "  {:<21} {}", "Model", parts.join(" · "))?;
+        writeln!(out, "  {:<21} {}", "", style.dim(&model.url))?;
     }
     if let Some(sold) = &report.sold {
         let covering = sold
@@ -141,7 +142,8 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
             .as_ref()
             .map(|span| format!(" · {span}"))
             .unwrap_or_default();
-        println!(
+        writeln!(
+            out,
             "  {:<21} {:>10}  {}",
             style.bold("Sold"),
             sold.median
@@ -152,11 +154,12 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
                 number(sold.read as u32),
                 if sold.read == 1 { "sale" } else { "sales" }
             ))
-        );
+        )?;
         // Quoted only when the whole record reaches back far enough to be describing a
         // different market than the one somebody is buying in today.
         if let Some(recent) = sold.recent_median {
-            println!(
+            writeln!(
+                out,
                 "  {:<21} {:>10}  {}",
                 "Sold, last year",
                 price(recent, currency),
@@ -164,9 +167,10 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
                     "median of the {} most recent — read this one, not the figure above",
                     number(sold.recent_sales as u32)
                 ))
-            );
+            )?;
         }
-        println!(
+        writeln!(
+            out,
             "  {:<21} {:>10}  {}",
             "Asking",
             report
@@ -184,9 +188,10 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
                 ),
                 _ => format!("{} listings on the market", number(report.market.listings)),
             })
-        );
+        )?;
         if let Some(discount) = sold.typical_discount {
-            println!(
+            writeln!(
+                out,
                 "  {:<21} {:>10}  {}",
                 "Room",
                 format!("{:.0}%", discount * 100.0),
@@ -195,46 +200,56 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
                     number(sold.sold_at_or_above_ask as u32),
                     number(sold.sales_with_both_prices as u32)
                 ))
-            );
+            )?;
         }
     } else {
-        println!(
+        writeln!(
+            out,
             "  {:<21} {} {} listings · {} · {}",
             "Market",
             number(report.market.listings),
             report.condition,
             currency,
             style.dim(SOURCE_SHORT)
-        );
+        )?;
     }
     if let Some(destination) = &report.delivered_to {
-        println!(
+        writeln!(
+            out,
             "  {:<21} {} {}",
             "Ships to",
             destination,
             style.dim("· only sellers who send there, priced delivered")
-        );
+        )?;
     }
-    println!("  {:<21} {}", "Method", style.dim(&report.market.method));
+    writeln!(
+        out,
+        "  {:<21} {}",
+        "Method",
+        style.dim(&report.market.method)
+    )?;
     if let Some(reading) = &report.interpreted_as {
-        println!(
+        writeln!(
+            out,
             "  {:<21} {} {}",
             "Read as",
             reading,
             style.dim(&format!("(you typed “{}”)", report.query))
-        );
+        )?;
     }
-    print_warnings(&report.diagnostics, style);
+    print_warnings(out, &report.diagnostics, style)?;
 
     if !report.alternatives.is_empty() {
-        println!();
-        println!(
+        writeln!(out)?;
+        writeln!(
+            out,
             "  {:<21} {}",
             "Close matches",
             style.dim("these fit what you typed about as well — price one with --model-id")
-        );
+        )?;
         for other in &report.alternatives {
-            println!(
+            writeln!(
+                out,
                 "  {:<21} {:<36} {}",
                 "",
                 fit(&other.title, 56),
@@ -243,19 +258,21 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
                     other.id,
                     number(other.used_listings)
                 ))
-            );
+            )?;
         }
     }
 
     if let Some(class) = &report.class {
-        println!();
-        println!(
+        writeln!(out)?;
+        writeln!(
+            out,
             "  {:<21} {}  {}",
             "Class",
             style.segment(class.segment, &class.segment.name().to_uppercase()),
             class.description
-        );
-        println!(
+        )?;
+        writeln!(
+            out,
             "  {:<21} {}",
             "",
             style.dim(&format!(
@@ -264,20 +281,22 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
                 number(class.peer_listings),
                 class.peer_group
             ))
-        );
+        )?;
     }
 
     if let Some(asking) = &report.asking {
-        println!();
-        println!(
+        writeln!(out)?;
+        writeln!(
+            out,
             "  {:<21} {}  {}",
             format!("Asking {}", money_of(asking.price)),
             style.band(asking.band, &asking.band.name().to_uppercase()),
             asking.verdict
-        );
+        )?;
         let gap = asking.against_median;
         let direction = if gap < 0.0 { "below" } else { "above" };
-        println!(
+        writeln!(
+            out,
             "  {:<21} {}",
             "",
             style.dim(&format!(
@@ -288,16 +307,16 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
                     Basis::Asking => "asking price",
                 }
             ))
-        );
+        )?;
     }
 
     if let Some(bands) = &report.bands {
-        println!();
-        print_bands(bands, currency, style);
+        writeln!(out)?;
+        print_bands(out, bands, currency, style)?;
     }
 
     if !report.market.percentiles.is_empty() && report.market.listings > 0 {
-        print_distribution(report, currency, style, full);
+        print_distribution(out, report, currency, style, full)?;
     }
 
     let (grades, grade_heading) = match report.sold.as_ref().filter(|sold| !sold.grades.is_empty())
@@ -312,8 +331,8 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
         ),
     };
     if !grades.is_empty() {
-        println!();
-        println!("{}", style.bold(grade_heading));
+        writeln!(out)?;
+        writeln!(out, "{}", style.bold(grade_heading))?;
         for grade in grades {
             let against = match grade.against_median {
                 Some(difference) if difference.abs() >= 1.0 => {
@@ -325,7 +344,8 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
                 }
                 _ => String::new(),
             };
-            println!(
+            writeln!(
+                out,
                 "  {:<21} {:>5} {:<9}{:>12}  {against}",
                 grade.grade,
                 number(grade.listings),
@@ -335,13 +355,14 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
                     "listings"
                 },
                 price(grade.median, currency),
-            );
+            )?;
         }
     }
 
     if let Some(share) = report.market.sellers_taking_offers {
-        println!();
-        println!(
+        writeln!(out)?;
+        writeln!(
+            out,
             "  {} of these sellers accept offers{}",
             percent(share),
             if share >= 0.5 {
@@ -349,32 +370,39 @@ pub fn print_price(report: &PriceReport, style: Style, full: bool) {
             } else {
                 ""
             }
-        );
+        )?;
     }
 
     if !report.listings.is_empty() {
-        println!();
-        println!(
+        writeln!(out)?;
+        writeln!(
+            out,
             "{}",
             style.bold(if report.delivered_to.is_some() {
                 "Cheapest delivered"
             } else {
                 "Cheapest listings"
             })
-        );
-        print_listing_rows(&report.listings, currency, style);
+        )?;
+        print_listing_rows(out, &report.listings, currency, style)?;
     }
 
-    print_usage(&report.diagnostics, style);
+    print_usage(out, &report.diagnostics, style)
 }
 
-fn print_bands(bands: &BandTable, currency: &str, style: Style) {
+fn print_bands(
+    out: &mut impl Write,
+    bands: &BandTable,
+    currency: &str,
+    style: Style,
+) -> io::Result<()> {
     let timed = bands.bands.iter().any(|row| row.days_listed.is_some());
     let paired = bands
         .bands
         .iter()
         .any(|row| row.asking_from.is_some() || row.asking_to.is_some());
-    println!(
+    writeln!(
+        out,
         "{}",
         style.bold(match bands.basis {
             Basis::Sold => "What people actually paid",
@@ -382,21 +410,27 @@ fn print_bands(bands: &BandTable, currency: &str, style: Style) {
                 "Price bands  (what sellers are asking, and whether anyone is paying it)",
             Basis::Asking => "Price bands  (what sellers are asking for this model right now)",
         })
-    );
+    )?;
     if paired {
-        println!(
+        writeln!(
+            out,
             "  {:<9} {:>25} {:>7} {:>25}",
             "Band", "Sold range", "Share", "Asking equivalent"
-        );
+        )?;
     } else if timed {
-        println!(
+        writeln!(
+            out,
             "  {:<9} {:>25} {:>7} {:>13}  Meaning",
             "Band", "Range", "Share", "Listed for"
-        );
+        )?;
     } else {
-        println!("  {:<9} {:>25} {:>7}  Meaning", "Band", "Range", "Share");
+        writeln!(
+            out,
+            "  {:<9} {:>25} {:>7}  Meaning",
+            "Band", "Range", "Share"
+        )?;
     }
-    println!("  {}", style.dim(&"─".repeat(rule_width() - 2)));
+    writeln!(out, "  {}", style.dim(&"─".repeat(rule_width() - 2)))?;
     let coarse = coarse_column(
         bands
             .bands
@@ -412,57 +446,65 @@ fn print_bands(bands: &BandTable, currency: &str, style: Style) {
         if paired {
             // No trailing verdict here: with both price columns the row is already at the
             // rule, and the band name and the caption below say what it means.
-            println!(
+            writeln!(
+                out,
                 "  {:<9} {:>25} {:>7} {:>25}",
                 style.band(band, &row.band),
                 range,
                 format!("{:.0}%", row.share * 100.0),
                 price_range(row.asking_from, row.asking_to, currency, coarse),
-            );
+            )?;
         } else if timed {
-            println!(
+            writeln!(
+                out,
                 "  {:<9} {:>25} {:>7} {:>13}  {}",
                 style.band(band, &row.band),
                 range,
                 format!("{:.0}%", row.share * 100.0),
                 row.days_listed.map(days).unwrap_or_else(|| "—".into()),
                 style.dim(&fit(&row.verdict, 60))
-            );
+            )?;
         } else {
-            println!(
+            writeln!(
+                out,
                 "  {:<9} {:>25} {:>7}  {}",
                 style.band(band, &row.band),
                 range,
                 format!("{:.0}%", row.share * 100.0),
                 style.dim(&fit(&row.verdict, 46))
-            );
+            )?;
         }
     }
     if paired {
-        println!(
+        writeln!(
+            out,
             "  {}",
             style.dim(
                 "Bands are cut from what people paid. The asking column is the listing price \
                  at the"
             )
-        );
-        println!(
+        )?;
+        writeln!(
+            out,
             "  {}",
             style.dim("same percentile — what a seller wants for gear that trades in that band.")
-        );
+        )?;
     } else if timed {
-        println!(
+        writeln!(
+            out,
             "  {}",
             style.dim(
                 "Listed for = median days these have been up. Cheap listings leave because \
                  they sell;"
             )
-        );
-        println!(
+        )?;
+        writeln!(
+            out,
             "  {}",
             style.dim("dear ones pile up, so a long wait is a price the market is not paying.")
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// `12 days`, `4 months`, `2.7 years` — the unit a reader thinks in at that scale.
@@ -475,9 +517,15 @@ fn days(count: i64) -> String {
     }
 }
 
-fn print_distribution(report: &PriceReport, currency: &str, style: Style, full: bool) {
-    println!();
-    println!("{}", style.bold("Distribution"));
+fn print_distribution(
+    out: &mut impl Write,
+    report: &PriceReport,
+    currency: &str,
+    style: Style,
+    full: bool,
+) -> io::Result<()> {
+    writeln!(out)?;
+    writeln!(out, "{}", style.bold("Distribution"))?;
     let mut cells = vec![
         ("low".to_string(), report.market.cheapest),
         ("p25".to_string(), 0.0),
@@ -504,15 +552,16 @@ fn print_distribution(report: &PriceReport, currency: &str, style: Style, full: 
         .iter()
         .map(|(_, value)| format!("{:>12}", price(*value, currency)))
         .collect();
-    println!("  {}", style.dim(&labels.join(" ")));
-    println!("  {}", values.join(" "));
+    writeln!(out, "  {}", style.dim(&labels.join(" ")))?;
+    writeln!(out, "  {}", values.join(" "))?;
 
     if !report.market.histogram.is_empty() && full {
-        println!();
-        println!(
+        writeln!(out)?;
+        writeln!(
+            out,
             "  {}",
             style.dim("Where the listings sit  (middle 90% — the tails are in low and high above)")
-        );
+        )?;
         let widest = report
             .market
             .histogram
@@ -522,40 +571,47 @@ fn print_distribution(report: &PriceReport, currency: &str, style: Style, full: 
             .unwrap_or(1)
             .max(1);
         for band in &report.market.histogram {
-            println!(
+            writeln!(
+                out,
                 "  {:>11} – {:<11} {:>6}  {}",
                 price(band.from, currency),
                 price(band.to, currency),
                 number(band.listings),
                 bar(band.listings, widest, 30)
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Models, classes, listings
 // ---------------------------------------------------------------------------
 
-pub fn print_models(report: &ModelReport, style: Style) {
+pub fn print_models(out: &mut impl Write, report: &ModelReport, style: Style) -> io::Result<()> {
     let currency = report.currency.as_str();
-    println!(
+    writeln!(
+        out,
         "{}",
         style.bold(&format!("GEARPRICE  models matching “{}”", report.query))
-    );
-    println!("{}", style.dim(&"═".repeat(rule_width())));
+    )?;
+    writeln!(out, "{}", style.dim(&"═".repeat(rule_width())))?;
     if report.models.is_empty() {
-        println!("  No catalogue model matches that. Try fewer words, or a different spelling.");
-        print_usage(&report.diagnostics, style);
-        return;
+        writeln!(
+            out,
+            "  No catalogue model matches that. Try fewer words, or a different spelling."
+        )?;
+        return print_usage(out, &report.diagnostics, style);
     }
-    println!(
+    writeln!(
+        out,
         "  {:<48} {:>6} {:>11} {:>6} {:>11}",
         "Model", "Used", "Used from", "New", "New from"
-    );
-    println!("  {}", style.dim(&"─".repeat(rule_width() - 2)));
+    )?;
+    writeln!(out, "  {}", style.dim(&"─".repeat(rule_width() - 2)))?;
     for model in &report.models {
-        println!(
+        writeln!(
+            out,
             "  {:<48} {:>6} {:>11} {:>6} {:>11}",
             truncate(&model.title, 48),
             number(model.used_listings),
@@ -568,68 +624,83 @@ pub fn print_models(report: &ModelReport, style: Style) {
                 .new_from
                 .map(|value| price(value, currency))
                 .unwrap_or_else(|| "—".into()),
-        );
+        )?;
     }
-    println!();
-    println!(
+    writeln!(out)?;
+    writeln!(
+        out,
         "  {}",
         style.dim("Price any of these exactly:  gearprice price --model-id <ID>")
-    );
+    )?;
     for model in report.models.iter().take(3) {
-        println!(
+        writeln!(
+            out,
             "  {}",
             style.dim(&format!(
                 "  {:<10} {}",
                 model.id,
                 truncate(&model.title, 60)
             ))
-        );
+        )?;
     }
-    print_usage(&report.diagnostics, style);
+    print_usage(out, &report.diagnostics, style)
 }
 
-pub fn print_classes(report: &ClassReport, style: Style) {
+pub fn print_classes(out: &mut impl Write, report: &ClassReport, style: Style) -> io::Result<()> {
     let currency = report.currency.as_str();
-    println!(
+    writeln!(
+        out,
         "{}",
         style.bold(&format!("GEARPRICE  price classes of {}", report.category))
-    );
-    println!("{}", style.dim(&"═".repeat(rule_width())));
-    println!(
+    )?;
+    writeln!(out, "{}", style.dim(&"═".repeat(rule_width())))?;
+    writeln!(
+        out,
         "  {:<21} {} {} listings · {} · {}",
         "Market",
         number(report.listings),
         report.condition,
         currency,
         style.dim(SOURCE_SHORT)
-    );
-    println!("  {:<21} {}", "Method", style.dim(&report.method));
-    print_warnings(&report.diagnostics, style);
-    println!();
-    println!("  {:<10} {:>27} {:>7}  Meaning", "Class", "Range", "Share");
-    println!("  {}", style.dim(&"─".repeat(rule_width() - 2)));
+    )?;
+    writeln!(out, "  {:<21} {}", "Method", style.dim(&report.method))?;
+    print_warnings(out, &report.diagnostics, style)?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "  {:<10} {:>27} {:>7}  Meaning",
+        "Class", "Range", "Share"
+    )?;
+    writeln!(out, "  {}", style.dim(&"─".repeat(rule_width() - 2)))?;
     let coarse = coarse_column(report.classes.iter().flat_map(|row| [row.from, row.to]));
     for row in &report.classes {
         let range = price_range(row.from, row.to, currency, coarse);
-        println!(
+        writeln!(
+            out,
             "  {:<10} {:>27} {:>7}  {}",
             style.segment(row.segment, row.segment.name()),
             range,
             format!("{:.0}%", row.share * 100.0),
             style.dim(&row.description)
-        );
+        )?;
     }
-    print_usage(&report.diagnostics, style);
+    print_usage(out, &report.diagnostics, style)
 }
 
-pub fn print_listings(report: &ListingReport, style: Style) {
+pub fn print_listings(
+    out: &mut impl Write,
+    report: &ListingReport,
+    style: Style,
+) -> io::Result<()> {
     let currency = report.currency.as_str();
-    println!(
+    writeln!(
+        out,
         "{}",
         style.bold(&format!("GEARPRICE  listings for “{}”", report.query))
-    );
-    println!("{}", style.dim(&"═".repeat(rule_width())));
-    println!(
+    )?;
+    writeln!(out, "{}", style.dim(&"═".repeat(rule_width())))?;
+    writeln!(
+        out,
         "  {:<21} {} of {} {} listings · {} · {}",
         "Showing",
         number(report.shown as u32),
@@ -637,30 +708,34 @@ pub fn print_listings(report: &ListingReport, style: Style) {
         report.condition,
         currency,
         style.dim(SOURCE_SHORT)
-    );
-    print_warnings(&report.diagnostics, style);
+    )?;
     if let Some(destination) = &report.delivered_to {
-        println!(
+        writeln!(
+            out,
             "  {:<21} {} {}",
             "Ships to",
             destination,
             style.dim("· only sellers who send there, priced delivered")
-        );
+        )?;
     }
-    print_warnings(&report.diagnostics, style);
+    print_warnings(out, &report.diagnostics, style)?;
     if let Some(bands) = &report.bands {
-        println!();
-        print_bands(bands, currency, style);
+        writeln!(out)?;
+        print_bands(out, bands, currency, style)?;
     }
-    println!();
-    print_listing_rows(&report.listings, currency, style);
-    print_usage(&report.diagnostics, style);
+    writeln!(out)?;
+    print_listing_rows(out, &report.listings, currency, style)?;
+    print_usage(out, &report.diagnostics, style)
 }
 
-fn print_listing_rows(listings: &[ListingSummary], currency: &str, style: Style) {
+fn print_listing_rows(
+    out: &mut impl Write,
+    listings: &[ListingSummary],
+    currency: &str,
+    style: Style,
+) -> io::Result<()> {
     if listings.is_empty() {
-        println!("  Nothing listed right now.");
-        return;
+        return writeln!(out, "  Nothing listed right now.");
     }
     let delivered = listings.iter().any(|listing| listing.shipping.is_some());
     // Per listing rather than per band, because a market too thin for a band median is
@@ -690,7 +765,8 @@ fn print_listing_rows(listings: &[ListingSummary], currency: &str, style: Style)
             None if aged => format!("  {:>10}", ""),
             None => String::new(),
         };
-        println!(
+        writeln!(
+            out,
             "  {:>11}  {label}  {:<14} {}{waiting}",
             price(listing.price, currency),
             truncate(&listing.condition, 14),
@@ -700,9 +776,9 @@ fn print_listing_rows(listings: &[ListingSummary], currency: &str, style: Style)
                 &listing.title,
                 42 + usize::from(delivered) * 22 + usize::from(aged) * 12,
             )
-        );
+        )?;
         if delivered {
-            println!("  {:>11}            {landed}", "");
+            writeln!(out, "  {:>11}            {landed}", "")?;
         }
         if let Some(url) = &listing.url {
             let shop = if listing.shop.is_empty() {
@@ -710,24 +786,30 @@ fn print_listing_rows(listings: &[ListingSummary], currency: &str, style: Style)
             } else {
                 format!("{} · ", listing.shop)
             };
-            println!(
+            writeln!(
+                out,
                 "  {:>11}            {}",
                 "",
                 style.dim(&format!("{shop}{url}"))
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 /// Warnings go first, because they change how the numbers under them should be read.
 ///
 /// "No catalogue model matched, so this prices the words themselves" is not a footnote:
 /// a reader who sees it after the bands has already believed them.
-fn print_warnings(diagnostics: &crate::report::Diagnostics, style: Style) {
+fn print_warnings(
+    out: &mut impl Write,
+    diagnostics: &crate::report::Diagnostics,
+    style: Style,
+) -> io::Result<()> {
     if diagnostics.warnings.is_empty() {
-        return;
+        return Ok(());
     }
-    println!();
+    writeln!(out)?;
     for warning in &diagnostics.warnings {
         for (index, line) in wrap(warning, rule_width() - 6).into_iter().enumerate() {
             let marker = if index == 0 {
@@ -735,9 +817,10 @@ fn print_warnings(diagnostics: &crate::report::Diagnostics, style: Style) {
             } else {
                 " ".to_string()
             };
-            println!("  {marker} {}", style.paint("33", &line));
+            writeln!(out, "  {marker} {}", style.paint("33", &line))?;
         }
     }
+    Ok(())
 }
 
 /// Wraps on whitespace at `width`, so a warning stays inside the rule the tables use.
@@ -764,30 +847,41 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn print_usage(diagnostics: &crate::report::Diagnostics, style: Style) {
-    println!();
-    println!(
+fn print_usage(
+    out: &mut impl Write,
+    diagnostics: &crate::report::Diagnostics,
+    style: Style,
+) -> io::Result<()> {
+    writeln!(out)?;
+    writeln!(
+        out,
         "{}",
         style.dim(&format!(
             "  {} API requests, {} served from cache",
             diagnostics.requests, diagnostics.cache_hits
         ))
-    );
+    )
 }
 
-pub fn print_variants(report: &VariantReport, style: Style) {
+pub fn print_variants(
+    out: &mut impl Write,
+    report: &VariantReport,
+    style: Style,
+) -> io::Result<()> {
     let currency = report.currency.as_str();
-    println!(
+    writeln!(
+        out,
         "{}",
         style.bold(&format!("GEARPRICE  versions of “{}”", report.query))
-    );
-    println!("{}", style.dim(&"═".repeat(rule_width())));
-    print_warnings(&report.diagnostics, style);
-    println!(
+    )?;
+    writeln!(out, "{}", style.dim(&"═".repeat(rule_width())))?;
+    print_warnings(out, &report.diagnostics, style)?;
+    writeln!(
+        out,
         "  {:<44} {:>6} {:>11} {:>11} {:>7}",
         "Version", "Used", "Asking from", "Sold", "Sales"
-    );
-    println!("  {}", style.dim(&"─".repeat(rule_width() - 2)));
+    )?;
+    writeln!(out, "  {}", style.dim(&"─".repeat(rule_width() - 2)))?;
     for variant in &report.variants {
         // The recent median where the record is long, since that is the one to act on.
         let sold = variant
@@ -795,7 +889,8 @@ pub fn print_variants(report: &VariantReport, style: Style) {
             .or(variant.sold_median)
             .map(|value| price(value, currency))
             .unwrap_or_else(|| "—".into());
-        println!(
+        writeln!(
+            out,
             "  {:<44} {:>6} {:>11} {:>11} {:>7}",
             truncate(&variant.title, 44),
             number(variant.used_listings),
@@ -805,32 +900,35 @@ pub fn print_variants(report: &VariantReport, style: Style) {
                 .unwrap_or_else(|| "—".into()),
             sold,
             number(variant.sales),
-        );
+        )?;
     }
-    println!();
-    println!(
+    writeln!(out)?;
+    writeln!(
+        out,
         "  {}",
         style.dim("Sold is the last year where a version has that much history, else all of it.")
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "  {}",
         style.dim("Price one exactly:  gearprice price --model-id <ID>")
-    );
+    )?;
     for variant in report.variants.iter().take(3) {
-        println!(
+        writeln!(
+            out,
             "  {}",
             style.dim(&format!(
                 "  {:<10} {}",
                 variant.id,
                 truncate(&variant.title, 58)
             ))
-        );
+        )?;
     }
-    print_usage(&report.diagnostics, style);
+    print_usage(out, &report.diagnostics, style)
 }
 
-pub fn print_variants_csv(report: &VariantReport) -> Result<()> {
-    let mut writer = csv::Writer::from_writer(io::stdout().lock());
+pub fn print_variants_csv(out: &mut impl Write, report: &VariantReport) -> io::Result<()> {
+    let mut writer = csv::Writer::from_writer(&mut *out);
     writer.write_record([
         "id",
         "title",
@@ -871,24 +969,32 @@ pub fn print_variants_csv(report: &VariantReport) -> Result<()> {
 }
 
 /// One listing, judged. The answer goes first, because it is the only thing being asked.
-pub fn print_deal(report: &DealReport, style: Style) {
+pub fn print_deal(out: &mut impl Write, report: &DealReport, style: Style) -> io::Result<()> {
     let currency = report.currency.as_str();
     let verdict = &report.verdict;
-    println!(
+    writeln!(
+        out,
         "{}",
         style.bold(&format!(
             "GEARPRICE  {}",
             truncate(&report.listing.title, 70)
         ))
-    );
-    println!("{}", style.dim(&"═".repeat(rule_width())));
-    println!(
+    )?;
+    writeln!(out, "{}", style.dim(&"═".repeat(rule_width())))?;
+    writeln!(
+        out,
         "  {:<21} {:>10}  {}",
         "Asking",
         price(verdict.price, currency),
         style.band(verdict.band, &verdict.band.name().to_uppercase())
-    );
-    println!("  {:<21} {:>10}  {}", "", "", style.dim(&verdict.verdict));
+    )?;
+    writeln!(
+        out,
+        "  {:<21} {:>10}  {}",
+        "",
+        "",
+        style.dim(&verdict.verdict)
+    )?;
 
     if let Some(sold) = &report.sold {
         let headline = sold.recent_median.or(sold.median);
@@ -896,7 +1002,8 @@ pub fn print_deal(report: &DealReport, style: Style) {
             let gap = verdict.price - median;
             let direction = if gap < 0.0 { "below" } else { "above" };
             let colour = if gap < 0.0 { "32" } else { "31" };
-            println!(
+            writeln!(
+                out,
                 "  {:<21} {:>10}  {}",
                 if sold.recent_median.is_some() {
                     "Sold, last year"
@@ -908,10 +1015,11 @@ pub fn print_deal(report: &DealReport, style: Style) {
                     colour,
                     &format!("this one is {} {direction}", price(gap.abs(), currency))
                 )
-            );
+            )?;
         }
         if let Some(discount) = sold.typical_discount {
-            println!(
+            writeln!(
+                out,
                 "  {:<21} {:>10}  {}",
                 "Room",
                 format!("{:.0}%", discount * 100.0),
@@ -920,19 +1028,21 @@ pub fn print_deal(report: &DealReport, style: Style) {
                     number(sold.sold_at_or_above_ask as u32),
                     number(sold.sales_with_both_prices as u32)
                 ))
-            );
+            )?;
             // The number somebody about to make an offer actually wants.
             let target = verdict.price * (1.0 + discount);
-            println!(
+            writeln!(
+                out,
                 "  {:<21} {:>10}  {}",
                 "An offer at",
                 price(target, currency),
                 style.dim("would be the usual discount off this asking price")
-            );
+            )?;
         }
     }
     if let Some(waiting) = report.listing.days_listed {
-        println!(
+        writeln!(
+            out,
             "  {:<21} {:>10}  {}",
             "Listed for",
             days(waiting),
@@ -941,56 +1051,60 @@ pub fn print_deal(report: &DealReport, style: Style) {
             } else {
                 ""
             })
-        );
+        )?;
     }
-    println!(
+    writeln!(
+        out,
         "  {:<21} {}",
         "Model",
         style.dim(&truncate(&report.model.title, 62))
-    );
-    print_warnings(&report.diagnostics, style);
+    )?;
+    print_warnings(out, &report.diagnostics, style)?;
 
-    println!();
-    print_bands(&report.bands, currency, style);
+    writeln!(out)?;
+    print_bands(out, &report.bands, currency, style)?;
     if let Some(url) = &report.listing.url {
-        println!();
-        println!("  {}", style.dim(url));
+        writeln!(out)?;
+        writeln!(out, "  {}", style.dim(url))?;
     }
-    print_usage(&report.diagnostics, style);
+    print_usage(out, &report.diagnostics, style)
 }
 
-pub fn print_track(report: &TrackReport, style: Style) {
+pub fn print_track(out: &mut impl Write, report: &TrackReport, style: Style) -> io::Result<()> {
     let currency = report.currency.as_str();
     let heading = report
         .model
         .as_ref()
         .map(|model| model.title.clone())
         .unwrap_or_else(|| report.query.clone());
-    println!("{}", style.bold(&format!("GEARPRICE  {heading}")));
-    println!("{}", style.dim(&"═".repeat(rule_width())));
-    println!(
+    writeln!(out, "{}", style.bold(&format!("GEARPRICE  {heading}")))?;
+    writeln!(out, "{}", style.dim(&"═".repeat(rule_width())))?;
+    writeln!(
+        out,
         "  {:<21} {} · {} · {}",
         "Tracking",
         plural(report.readings.len(), "reading"),
         report.condition,
         currency
-    );
+    )?;
     if !report.recorded {
-        println!(
+        writeln!(
+            out,
             "  {:<21} {}",
             "",
             style.dim("today's reading is shown but was not recorded (--no-record)")
-        );
+        )?;
     }
-    print_warnings(&report.diagnostics, style);
+    print_warnings(out, &report.diagnostics, style)?;
 
     if let Some(movement) = &report.movement {
-        println!();
+        writeln!(out)?;
         let change = movement.median_change().unwrap_or_default();
         let share = movement.median_change_share().unwrap_or_default();
         let direction = if change < 0.0 { "down" } else { "up" };
         let colour = if change < 0.0 { "32" } else { "31" };
-        println!(
+        writeln!(
+            out,
             "  {:<21} {:>10}  {}",
             "Median",
             price(movement.median_now.unwrap_or_default(), currency),
@@ -1003,26 +1117,29 @@ pub fn print_track(report: &TrackReport, style: Style) {
                     local_date(&movement.since.to_rfc3339())
                 )
             )
-        );
+        )?;
         let listings = i64::from(movement.listings_now) - i64::from(movement.listings_then);
-        println!(
+        writeln!(
+            out,
             "  {:<21} {:>10}  {}",
             "Listings",
             number(movement.listings_now),
             style.dim(&format!("{listings:+} on the market since then"))
-        );
+        )?;
     }
 
-    println!();
-    println!("{}", style.bold("Readings"));
-    println!(
+    writeln!(out)?;
+    writeln!(out, "{}", style.bold("Readings"))?;
+    writeln!(
+        out,
         "  {:<12} {:>12} {:>10} {:>14}",
         "When", "Median", "Listings", "Typical wait"
-    );
-    println!("  {}", style.dim(&"─".repeat(52)));
+    )?;
+    writeln!(out, "  {}", style.dim(&"─".repeat(52)))?;
     let last = report.readings.len().saturating_sub(1);
     for (index, reading) in report.readings.iter().enumerate() {
-        println!(
+        writeln!(
+            out,
             "  {:<12} {:>12} {:>10} {:>14}{}",
             local_date(&reading.recorded_at),
             reading
@@ -1039,36 +1156,40 @@ pub fn print_track(report: &TrackReport, style: Style) {
             } else {
                 String::new()
             }
-        );
+        )?;
     }
-    print_usage(&report.diagnostics, style);
+    print_usage(out, &report.diagnostics, style)
 }
 
-pub fn print_tracked(report: &TrackedReport, style: Style) {
-    println!("{}", style.bold("GEARPRICE  what is being tracked"));
-    println!("{}", style.dim(&"═".repeat(rule_width())));
+pub fn print_tracked(out: &mut impl Write, report: &TrackedReport, style: Style) -> io::Result<()> {
+    writeln!(out, "{}", style.bold("GEARPRICE  what is being tracked"))?;
+    writeln!(out, "{}", style.dim(&"═".repeat(rule_width())))?;
     if report.tracked.is_empty() {
-        println!("  Nothing yet. `gearprice track \"<gear>\"` takes the first reading.");
-        println!("  {}", style.dim(&report.history));
-        return;
+        writeln!(
+            out,
+            "  Nothing yet. `gearprice track \"<gear>\"` takes the first reading."
+        )?;
+        return writeln!(out, "  {}", style.dim(&report.history));
     }
-    println!(
+    writeln!(
+        out,
         "  {:<44} {:>9} {:>9} {:>8} {:>12}",
         "Model", "Currency", "Condition", "Readings", "Last read"
-    );
-    println!("  {}", style.dim(&"─".repeat(rule_width() - 2)));
+    )?;
+    writeln!(out, "  {}", style.dim(&"─".repeat(rule_width() - 2)))?;
     for subject in &report.tracked {
-        println!(
+        writeln!(
+            out,
             "  {:<44} {:>9} {:>9} {:>8} {:>12}",
             truncate(&subject.title, 44),
             subject.currency,
             truncate(&subject.condition, 9),
             number(subject.readings as u32),
             local_date(&subject.last_recorded)
-        );
+        )?;
     }
-    println!();
-    println!("  {}", style.dim(&report.history));
+    writeln!(out)?;
+    writeln!(out, "  {}", style.dim(&report.history))
 }
 
 /// A timestamp as a plain date, for a column a person reads.
@@ -1080,8 +1201,8 @@ fn local_date(timestamp: &str) -> String {
 // CSV
 // ---------------------------------------------------------------------------
 
-pub fn print_price_csv(report: &PriceReport) -> Result<()> {
-    let mut writer = csv::Writer::from_writer(io::stdout().lock());
+pub fn print_price_csv(out: &mut impl Write, report: &PriceReport) -> io::Result<()> {
+    let mut writer = csv::Writer::from_writer(&mut *out);
     writer.write_record([
         "query",
         "model",
@@ -1102,7 +1223,7 @@ pub fn print_price_csv(report: &PriceReport) -> Result<()> {
         .as_ref()
         .map(|model| model.id.to_string())
         .unwrap_or_default();
-    let mut row = |metric: &str, value: String| -> Result<()> {
+    let mut row = |metric: &str, value: String| -> io::Result<()> {
         writer.write_record([
             neutralize(&report.query),
             neutralize(&model),
@@ -1180,8 +1301,8 @@ pub fn print_price_csv(report: &PriceReport) -> Result<()> {
     Ok(())
 }
 
-pub fn print_listings_csv(report: &ListingReport) -> Result<()> {
-    let mut writer = csv::Writer::from_writer(io::stdout().lock());
+pub fn print_listings_csv(out: &mut impl Write, report: &ListingReport) -> io::Result<()> {
+    let mut writer = csv::Writer::from_writer(&mut *out);
     writer.write_record([
         "price",
         "currency",
@@ -1211,8 +1332,8 @@ pub fn print_listings_csv(report: &ListingReport) -> Result<()> {
     Ok(())
 }
 
-pub fn print_models_csv(report: &ModelReport) -> Result<()> {
-    let mut writer = csv::Writer::from_writer(io::stdout().lock());
+pub fn print_models_csv(out: &mut impl Write, report: &ModelReport) -> io::Result<()> {
+    let mut writer = csv::Writer::from_writer(&mut *out);
     writer.write_record([
         "id",
         "title",
@@ -1247,8 +1368,8 @@ pub fn print_models_csv(report: &ModelReport) -> Result<()> {
     Ok(())
 }
 
-pub fn print_classes_csv(report: &ClassReport) -> Result<()> {
-    let mut writer = csv::Writer::from_writer(io::stdout().lock());
+pub fn print_classes_csv(out: &mut impl Write, report: &ClassReport) -> io::Result<()> {
+    let mut writer = csv::Writer::from_writer(&mut *out);
     writer.write_record([
         "category",
         "currency",
@@ -1361,6 +1482,11 @@ fn bar(value: u32, largest: u32, width: usize) -> String {
 /// and makes the whole table unreadable rather than just the one cell.
 fn fit(text: &str, used: usize) -> String {
     truncate(text, rule_width().saturating_sub(used).max(8))
+}
+
+/// Public so a prompt can draw rows that fit, without duplicating the rule.
+pub fn shorten(value: &str, width: usize) -> String {
+    truncate(value, width)
 }
 
 fn truncate(value: &str, width: usize) -> String {

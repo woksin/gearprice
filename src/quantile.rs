@@ -6,21 +6,27 @@
 //! distribution function of the market, evaluated at P, one HTTP request at a time.
 //!
 //! Given that, a percentile is a search rather than a download. For the p-th percentile
-//! of n listings, the answer is the lowest price P where `count(P) >= ceil(p·n)`, and an
-//! interpolating search finds it in a logarithmic number of probes.
+//! of n listings, the answer is the lowest price P where `count(P) >= ceil(p·n)`, and a
+//! bracketing search finds it in a logarithmic number of probes.
 //!
-//! The percentiles are searched concurrently, sharing one memoised curve. That matters
-//! more than it sounds: counting a category of a hundred thousand listings takes Reverb
-//! well over a second per request, so seven searches in sequence is a minute and a half
-//! of waiting, and the same seven in parallel is under half of that. The curve they leave
-//! behind doubles as a histogram of the market.
+//! The percentiles are searched concurrently, sharing one curve. That matters more than it
+//! sounds: counting a category of a hundred thousand listings takes Reverb well over a
+//! second per request, so seven searches in sequence is a minute and a half of waiting, and
+//! the same seven in parallel is under half of that. The curve they leave behind doubles as
+//! a histogram of the market.
+//!
+//! What the wall clock is actually made of is round trips, not requests. Reverb answers a
+//! dozen counts at once as happily as one, so every round of the search asks for
+//! everything it could want at that point — three cuts of a wide bracket, or every price
+//! left in a narrow one — and the run is as long as the search is deep. That is why
+//! nothing here trades round trips for probes.
 //!
 //! Percentiles come out at whole-major-unit resolution, which is the finest granularity
 //! Reverb's price bounds accept. Within that, the answer is exact: it is the same number
 //! a full enumeration would produce, from a few dozen requests, on a market of any size.
 
-use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 use anyhow::Result;
 
@@ -43,12 +49,17 @@ const LADDER_STEPS: u32 = 8;
 /// than the rounds fall, and they all land on somebody else's server.
 const WIDE_ARITY: MajorUnits = 4;
 
-/// Below this many units, a bracket is not worth spending three requests on.
+/// The widest bracket still worth enumerating outright rather than cutting again.
 ///
-/// Kept low on purpose. Tracing a class ladder showed the search spending most of its wall
-/// clock in the narrow phase — a wide bracket falls to sixty-four units in a handful of
-/// quartered rounds, and then crawls the rest one probe at a time. Those last rounds are
-/// where the time goes, so they are quartered too.
+/// Cutting a bracket this small is a false economy. Tracing `classes electric-guitars`
+/// cold showed the search reaching a six-unit bracket in five quartered rounds and then
+/// spending two more rounds crawling down it one probe at a time — and by then the other
+/// percentiles had finished, so those two rounds were 3.4s of the 21s with a single
+/// request in flight. Asking for every price left in the bracket at once settles it in one
+/// round for at most five requests, which is what a cutting round costs anyway.
+///
+/// Six is where the exchange stops paying: a wider sweep buys another round trip, but the
+/// price doubles with every unit of width, and they all land on somebody else's server.
 const WIDE_ENOUGH: MajorUnits = 6;
 
 /// The percentiles every price report quotes, as fractions of the population.
@@ -120,6 +131,86 @@ impl Sketch {
     }
 }
 
+/// The curve every search shares, and the prices already out for counting.
+///
+/// Memoising answers is not enough on its own, because a memo cannot answer for a request
+/// that has not come back yet. The searches start at the same instant from brackets the
+/// seeding ladder hands them, and two percentiles that land in the same bracket quarter it
+/// into the same three cuts: tracing `classes electric-guitars` cold caught 6 of its 88
+/// requests going out as exact duplicates, in the same instant, of a sibling's. So a price
+/// is claimed before it is asked for, and a search that wants a claimed price waits for the
+/// answer instead of buying a second copy of it.
+struct Curve {
+    known: Mutex<Known>,
+    settled: Condvar,
+}
+
+#[derive(Default)]
+struct Known {
+    /// Price to the number of listings at or below it.
+    counts: BTreeMap<MajorUnits, u32>,
+    /// Prices some thread has claimed and is waiting on the server for.
+    claimed: BTreeSet<MajorUnits>,
+}
+
+impl Curve {
+    fn new(seed: impl IntoIterator<Item = (MajorUnits, u32)>) -> Self {
+        Self {
+            known: Mutex::new(Known {
+                counts: seed.into_iter().collect(),
+                claimed: BTreeSet::new(),
+            }),
+            settled: Condvar::new(),
+        }
+    }
+
+    /// A poisoned curve is still a correct curve — it only ever holds answers the server
+    /// gave — so a panicking sibling must not take the run down with it.
+    fn locked(&self) -> MutexGuard<'_, Known> {
+        self.known.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// The count at `price`: from the curve if it is already there, from a sibling's
+    /// request if one is already out for it, and from `ask` otherwise.
+    fn count(&self, price: MajorUnits, ask: &impl Fn(MajorUnits) -> Result<u32>) -> Result<u32> {
+        let mut known = self.locked();
+        loop {
+            if let Some(found) = known.counts.get(&price) {
+                return Ok(*found);
+            }
+            if !known.claimed.contains(&price) {
+                break;
+            }
+            known = self
+                .settled
+                .wait(known)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        known.claimed.insert(price);
+        drop(known);
+
+        let claim = Claim { curve: self, price };
+        let count = ask(price)?;
+        self.locked().counts.insert(price, count);
+        drop(claim);
+        Ok(count)
+    }
+}
+
+/// Gives a claimed price back however the request ends, so a search waiting on one is
+/// never left waiting on a thread that failed or panicked.
+struct Claim<'a> {
+    curve: &'a Curve,
+    price: MajorUnits,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        self.curve.locked().claimed.remove(&self.price);
+        self.curve.settled.notify_all();
+    }
+}
+
 /// The nearest-rank position of a percentile in a population of `total`.
 ///
 /// One-based, so rank 1 is the cheapest listing and rank `total` the dearest. A fraction
@@ -151,7 +242,7 @@ pub fn sketch(
 
     // The bracket is known without asking: nothing sits below the cheapest listing, and
     // everything sits at or below the dearest.
-    let curve = Mutex::new(BTreeMap::from([(low.saturating_sub(1), 0), (high, total)]));
+    let curve = Curve::new([(low.saturating_sub(1), 0), (high, total)]);
 
     // A log-spaced ladder first, taken in parallel — one round trip for all of it. This
     // exists purely to stop the searches below duplicating each other's work: without it
@@ -164,9 +255,7 @@ pub fn sketch(
         .filter(|price| *price > low && *price < high)
         .collect();
     crate::parallel::each(&rungs, |price| {
-        let count = count_at_or_below(*price)?;
-        locked(&curve).insert(*price, count);
-        Ok(())
+        curve.count(*price, &count_at_or_below).map(|_| ())
     })?;
 
     // Each percentile then runs its own search, and every probe any of them takes lands
@@ -179,8 +268,10 @@ pub fn sketch(
 
     Ok(Sketch {
         curve: curve
+            .known
             .into_inner()
-            .unwrap_or_else(|error| error.into_inner()),
+            .unwrap_or_else(|error| error.into_inner())
+            .counts,
         quantiles,
     })
 }
@@ -188,34 +279,28 @@ pub fn sketch(
 /// Finds one percentile, consulting and filling the shared curve as it goes.
 fn solve(
     count_at_or_below: &(impl Fn(MajorUnits) -> Result<u32> + Sync),
-    curve: &Mutex<BTreeMap<MajorUnits, u32>>,
+    curve: &Curve,
     total: u32,
     low: MajorUnits,
     high: MajorUnits,
     fraction: f64,
 ) -> Result<MajorUnits> {
     let rank = rank_for(fraction, total);
-    let probe = |price: MajorUnits| -> Result<u32> {
-        if let Some(known) = locked(curve).get(&price) {
-            return Ok(*known);
-        }
-        let count = count_at_or_below(price)?;
-        locked(curve).insert(price, count);
-        Ok(count)
-    };
 
     // Bracket from whatever is already known: the highest probe still short of the rank,
     // and the lowest probe that reaches it.
     let (mut below, mut at_or_above) = {
-        let curve = locked(curve);
+        let known = curve.locked();
         (
-            curve
+            known
+                .counts
                 .iter()
                 .filter(|(_, count)| **count < rank)
                 .map(|(price, _)| *price)
                 .next_back()
                 .unwrap_or(low.saturating_sub(1)),
-            curve
+            known
+                .counts
                 .iter()
                 .find(|(_, count)| **count >= rank)
                 .map(|(price, _)| *price)
@@ -227,13 +312,15 @@ fn solve(
     // listing carries — $2,003 for a model where two hundred sellers all ask $1,999 —
     // which reads as precision while being wrong about the market.
     //
-    // A wide bracket is cut into quarters, all three cuts asked for at once, because the
-    // cost here is round trips rather than requests. Once it is narrow the search goes
-    // back to one probe at a time, interpolating: the bracket comes with the counts at
-    // both ends, so the position of the rank between them predicts the price far better
-    // than the midpoint does. Every other narrow step falls back to the midpoint, which
-    // keeps the logarithmic worst case when a distribution defeats the guess.
-    let mut step = 0_u32;
+    // Both moves here ask for everything they need at once, because the cost is round
+    // trips rather than requests. A wide bracket is cut into quarters; one small enough to
+    // enumerate is simply enumerated, every remaining price at once, which ends the search
+    // in that round. Nothing is interpolated any more: a guess only ever saved requests the
+    // search was going to issue in parallel anyway, and it cost the round trips it took to
+    // recover when a distribution defeated it.
+    //
+    // The depth is therefore fixed rather than distribution-dependent: one round per
+    // quartering, log-base-four of the price range of them, and one to finish.
     while at_or_above - below > 1 {
         let width = at_or_above - below;
         let cuts: Vec<MajorUnits> = if width > WIDE_ENOUGH {
@@ -242,25 +329,17 @@ fn solve(
                 .filter(|cut| *cut > below && *cut < at_or_above)
                 .collect()
         } else {
-            let (count_below, count_above) = {
-                let curve = locked(curve);
-                (
-                    curve.get(&below).copied().unwrap_or(0),
-                    curve.get(&at_or_above).copied().unwrap_or(total),
-                )
-            };
-            vec![if step.is_multiple_of(2) {
-                interpolate(below, count_below, at_or_above, count_above, rank)
-            } else {
-                below + width / 2
-            }]
+            (below + 1..at_or_above).collect()
         };
         if cuts.is_empty() {
             break;
         }
 
-        let counted: Vec<(MajorUnits, u32)> =
-            crate::parallel::each(&cuts, |cut| probe(*cut).map(|count| (*cut, count)))?;
+        let counted: Vec<(MajorUnits, u32)> = crate::parallel::each(&cuts, |cut| {
+            curve
+                .count(*cut, count_at_or_below)
+                .map(|count| (*cut, count))
+        })?;
         for (cut, count) in counted {
             if count >= rank {
                 at_or_above = at_or_above.min(cut);
@@ -268,17 +347,8 @@ fn solve(
                 below = below.max(cut);
             }
         }
-        step += 1;
     }
     Ok(at_or_above)
-}
-
-/// A poisoned curve is still a correct curve — it only ever holds answers the server
-/// gave — so a panicking sibling must not take the run down with it.
-fn locked(
-    curve: &Mutex<BTreeMap<MajorUnits, u32>>,
-) -> std::sync::MutexGuard<'_, BTreeMap<MajorUnits, u32>> {
-    curve.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 /// The `step`-th of `steps` points from `low` to `high`, spaced geometrically.
@@ -287,31 +357,6 @@ fn logarithmic_step(low: MajorUnits, high: MajorUnits, step: u32, steps: u32) ->
     let high = high.max(2) as f64;
     let fraction = f64::from(step) / f64::from(steps);
     (low * (high / low).powf(fraction)).round() as MajorUnits
-}
-
-/// Guesses where `rank` falls between two probed prices, assuming listings are spread
-/// evenly between them. Always lands strictly inside the bracket, so a guess that is
-/// wildly wrong still makes progress rather than looping.
-fn interpolate(
-    below: MajorUnits,
-    count_below: u32,
-    at_or_above: MajorUnits,
-    count_above: u32,
-    rank: u32,
-) -> MajorUnits {
-    let width = at_or_above - below;
-    let span = count_above.saturating_sub(count_below);
-    let guess = if span == 0 {
-        below + width / 2
-    } else {
-        let position = f64::from(rank.saturating_sub(count_below)) / f64::from(span);
-        below + (width as f64 * position).round() as MajorUnits
-    };
-    // Held away from the bracket edges. A rank sitting exactly on the upper count — the
-    // common case, since counts are step functions — interpolates to the very top of the
-    // window and would then creep down one unit at a time.
-    let margin = (width / 8).max(1);
-    guess.clamp(below + margin, at_or_above - margin)
 }
 
 #[cfg(test)]

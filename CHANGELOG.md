@@ -8,6 +8,34 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A configuration file, so settings you would otherwise retype every run can be written
+  down once. `gearprice config` shows where it lives and what is in force; `--example`
+  prints a commented sample. Flags beat environment variables beat the file beats the
+  defaults, and a typo in the file costs that line rather than the run.
+- Long reports go to a pager when stdout is a terminal, honouring `PAGER` and defaulting
+  to `less -F -I -R -X`. `--no-pager` prints straight out; a pipe never pages.
+- When several models fit a query and somebody is there to answer, gearprice asks which
+  was meant instead of printing ids to copy. `--no-input` turns it off, a pipe never
+  triggers it, and `--model-id` still answers in advance.
+- `gearprice completions <shell>`.
+
+### Changed
+
+- `variants` is gone; `models` does what it did, with what each version sells for shown by
+  default and `--quick` to skip the sold lookups. Two commands answering "which of these
+  did I mean" was one too many.
+- A cold class ladder over 108,000 listings went from 30 seconds to about 19.
+- Tables are drawn to the width of the terminal rather than a fixed 92 columns.
+- Output no longer dies with a broken pipe when the reader stops reading, so
+  `gearprice … | head` and quitting the pager early both exit quietly.
+
+### Fixed
+
+- The listings report printed its warnings twice.
+- The spinner kept turning underneath a paged report.
+
+### Added
+
 - Sold prices, read from `/api/comparison_shopping_pages/{id}/transactions`. Bands are now
   cut from what people actually paid, with asking prices shown beside them as the
   negotiating position, and the typical discount off asking reported with the spread.

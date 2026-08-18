@@ -65,7 +65,9 @@ pub struct Client {
     agent: ureq::Agent,
     currency: String,
     cache: Option<ResponseCache>,
-    pace: Mutex<Option<Instant>>,
+    /// The earliest moment the next request may leave, rather than the moment the last one
+    /// did. See [`Client::pace`] for why the difference matters.
+    next_slot: Mutex<Option<Instant>>,
     min_interval: Duration,
     requests: AtomicU32,
     cache_hits: AtomicU32,
@@ -95,7 +97,7 @@ impl Client {
             agent: config.into(),
             currency,
             cache,
-            pace: Mutex::new(None),
+            next_slot: Mutex::new(None),
             min_interval: Duration::from_millis(80),
             requests: AtomicU32::new(0),
             cache_hits: AtomicU32::new(0),
@@ -124,17 +126,43 @@ impl Client {
         }
     }
 
-    /// Sleeps just long enough that requests leave at most `min_interval` apart, however
-    /// many threads are asking at once.
+    /// Holds the long-run rate to one request every `min_interval`, while still letting a
+    /// whole round of probes leave together.
+    ///
+    /// This used to remember when the last request left and sleep until `min_interval`
+    /// after it — while holding the lock, so threads that became ready at the same instant
+    /// left in a chain, one every 80ms. Tracing `classes electric-guitars` cold showed what
+    /// that costs: each round of the percentile search smeared its twelve requests over
+    /// 0.93s on top of a 1.6s answer, and because a round is a barrier the smear was added
+    /// to the wall clock every time. Removing it took the run from 23.9s to 21.6s.
+    ///
+    /// What has to be paced is the average rate, not the gap between neighbours, so slots
+    /// are handed out instead: a caller claims the next one under the lock and then sleeps
+    /// for it outside, and the slot may already sit up to [`CONCURRENCY`] intervals in the
+    /// past, which is a burst allowance of exactly one round. Reverb is unbothered by
+    /// twelve at once — eight concurrent probes come back in 2.4s where eight in sequence
+    /// take 13.5s — and the ceiling of one request every 80ms over any longer window is
+    /// the same as it was.
     fn pace(&self) {
-        let mut last = self.pace.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(previous) = *last {
-            let elapsed = previous.elapsed();
-            if elapsed < self.min_interval {
-                thread::sleep(self.min_interval - elapsed);
-            }
+        let wait = {
+            let mut next = self
+                .next_slot
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let now = Instant::now();
+            let earliest = now
+                .checked_sub(self.min_interval * CONCURRENCY as u32)
+                .unwrap_or(now);
+            let slot = match *next {
+                Some(claimed) if claimed > earliest => claimed,
+                _ => earliest,
+            };
+            *next = Some(slot + self.min_interval);
+            slot.saturating_duration_since(now)
+        };
+        if !wait.is_zero() {
+            thread::sleep(wait);
         }
-        *last = Some(Instant::now());
     }
 
     fn fetch(&self, url: &str) -> Result<String> {
@@ -869,6 +897,38 @@ mod tests {
         assert_eq!(2, page.total);
         assert_eq!(Money::from_minor(175_000), page.listings[0].amount());
         assert_eq!("A guitar", page.listings[0].describe());
+    }
+
+    #[test]
+    fn a_whole_round_of_probes_leaves_at_once_and_the_rate_still_holds_after_it() {
+        let client = Client::new("USD".to_string(), None, DEFAULT_REQUEST_BUDGET);
+
+        // The incident this guards: pacing that slept while holding the lock turned a
+        // round of twelve simultaneous probes into a chain, adding 0.93s to every round of
+        // a percentile search.
+        let started = Instant::now();
+        thread::scope(|scope| {
+            for _ in 0..CONCURRENCY {
+                scope.spawn(|| client.pace());
+            }
+        });
+        assert!(
+            started.elapsed() < client.min_interval,
+            "a round of {CONCURRENCY} took {:?} to leave, which is a queue rather than a round",
+            started.elapsed()
+        );
+
+        // With the allowance spent, the long-run ceiling is back: four more requests
+        // cannot leave in less than three intervals.
+        let started = Instant::now();
+        for _ in 0..4 {
+            client.pace();
+        }
+        assert!(
+            started.elapsed() >= client.min_interval * 2,
+            "four more requests left in {:?}, which is faster than the promised rate",
+            started.elapsed()
+        );
     }
 
     #[test]

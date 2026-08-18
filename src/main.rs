@@ -2,13 +2,16 @@
 
 mod cache;
 mod classify;
+mod config;
 mod history;
 mod market;
 mod money;
 mod output;
+mod pager;
 mod parallel;
 mod paths;
 mod progress;
+mod prompt;
 mod quantile;
 mod query;
 mod report;
@@ -21,11 +24,12 @@ mod taxonomy;
 mod update;
 mod years;
 
+use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use classify::{Band, Bands, SEGMENT_PERCENTILES, place, segment_ladder};
 use history::{History, Movement, Snapshot, Subject};
@@ -81,13 +85,12 @@ struct Cli {
         short = 'c',
         global = true,
         env = "GEARPRICE_CURRENCY",
-        default_value = "USD",
         value_name = "CODE"
     )]
-    currency: String,
+    currency: Option<String>,
 
-    #[arg(long, global = true, value_enum, default_value_t = Format::Table)]
-    format: Format,
+    #[arg(long, global = true, value_enum)]
+    format: Option<Format>,
 
     /// Ignore cached responses and ask Reverb again.
     #[arg(long, global = true)]
@@ -98,10 +101,9 @@ struct Cli {
         long,
         global = true,
         env = "GEARPRICE_CACHE_TTL",
-        default_value_t = 360,
         value_name = "MINUTES"
     )]
-    cache_ttl: u64,
+    cache_ttl: Option<u64>,
 
     /// Most API requests one run may make.
     #[arg(long, global = true, default_value_t = DEFAULT_REQUEST_BUDGET, value_name = "N")]
@@ -112,14 +114,52 @@ struct Cli {
 
     #[arg(long, global = true, help = "Do not colour the output")]
     no_color: bool,
+
+    /// Print long reports straight out instead of handing them to a pager.
+    #[arg(long, global = true)]
+    no_pager: bool,
+
+    /// Everything above, after the configuration file and the built-in defaults have had
+    /// their say. Filled in once, immediately after parsing.
+    #[arg(skip)]
+    settled: Settled,
+
+    /// Never stop to ask which model was meant; take the closest and carry on.
+    #[arg(long, global = true)]
+    no_input: bool,
+}
+
+/// What the flags, the environment, the configuration file and the defaults add up to.
+///
+/// clig.dev's precedence, and the reason the flags above are all `Option`: with a clap
+/// `default_value` there is no way to tell "the user asked for USD" from "the user said
+/// nothing", so a configuration file could never win and would silently do nothing.
+impl Settled {
+    /// How many sales to read, with the flag winning over the file over the default.
+    fn sold_sample(&self, flag: Option<u32>) -> u32 {
+        config::resolve(flag, None, self.sold_sample, sold::TARGET_SAMPLE)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct Settled {
+    currency: String,
+    format: Format,
+    cache_ttl: u64,
+    no_pager: bool,
+    condition: Option<Condition>,
+    ships_to: Option<String>,
+    region: Option<String>,
+    sold_sample: Option<u32>,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Price one model: its bands, its class, and a verdict on an asking price
     Price(Box<PriceArguments>),
-    /// Find the catalogue models matching a search, to price one exactly
-    #[command(visible_alias = "search")]
+    /// Find which model is which: the versions that match, and what each one sells for
+    #[command(visible_aliases = ["search", "variants"])]
     Models(ModelsArguments),
     /// List what is for sale right now, labelled by band
     Listings(ListingsArguments),
@@ -129,12 +169,12 @@ enum Command {
     Categories,
     /// Judge one listing: paste its Reverb address, or give its id
     Deal(Box<DealArguments>),
-    /// Compare every version of a model — eras, guitar against bass, each run
-    Variants(VariantsArguments),
     /// Record what a market costs today, and show what it has done since
     Track(Box<TrackArguments>),
     /// Print a shell completion script
     Completions(CompletionArguments),
+    /// Show where settings are read from, and print a sample file
+    Config(ConfigArguments),
     /// Inspect or empty the response cache
     Cache(CacheArguments),
     /// Check for and install a newer gearprice release
@@ -145,8 +185,8 @@ enum Command {
 #[derive(Clone, Debug, Args)]
 struct Filters {
     /// Which condition to price.
-    #[arg(long, value_enum, default_value_t = Condition::Used)]
-    condition: Condition,
+    #[arg(long, value_enum)]
+    condition: Option<Condition>,
 
     /// Restrict to a category slug, or `root/leaf`. See `gearprice categories`.
     #[arg(long, value_name = "SLUG")]
@@ -169,6 +209,40 @@ struct Filters {
     /// Only listings whose seller ships to here, and price them delivered.
     #[arg(long, env = "GEARPRICE_SHIPS_TO", value_name = "CODE")]
     ships_to: Option<String>,
+}
+
+impl Filters {
+    /// The filters as they stand once the configuration file has had its say.
+    fn settled(&self, settled: &Settled) -> Self {
+        Self {
+            condition: Some(
+                self.condition
+                    .or(settled.condition)
+                    .unwrap_or_default_used(),
+            ),
+            category: self.category.clone(),
+            make: self.make.clone(),
+            year_min: self.year_min,
+            year_max: self.year_max,
+            region: self.region.clone().or_else(|| settled.region.clone()),
+            ships_to: self.ships_to.clone().or_else(|| settled.ships_to.clone()),
+        }
+    }
+
+    /// The condition to price, which is used gear unless something said otherwise.
+    fn condition(&self) -> Condition {
+        self.condition.unwrap_or(Condition::Used)
+    }
+}
+
+trait OrUsed {
+    fn unwrap_or_default_used(self) -> Condition;
+}
+
+impl OrUsed for Option<Condition> {
+    fn unwrap_or_default_used(self) -> Condition {
+        self.unwrap_or(Condition::Used)
+    }
 }
 
 #[derive(Debug, Args)]
@@ -202,8 +276,8 @@ struct PriceArguments {
     no_sold: bool,
 
     /// How many recent sales to read.
-    #[arg(long, default_value_t = sold::TARGET_SAMPLE, value_name = "N")]
-    sold_sample: u32,
+    #[arg(long, value_name = "N")]
+    sold_sample: Option<u32>,
 
     /// How many listings to show.
     #[arg(long, default_value_t = 3, value_name = "N")]
@@ -222,8 +296,16 @@ struct ModelsArguments {
     #[arg(value_name = "QUERY", num_args = 1..)]
     query: Vec<String>,
 
-    #[arg(long, default_value_t = 15, value_name = "N")]
+    #[arg(long, default_value_t = 8, value_name = "N")]
     limit: u32,
+
+    /// Skip the sold lookups. One request instead of nine, and no idea what they go for.
+    #[arg(long)]
+    quick: bool,
+
+    /// How many recent sales to read for each.
+    #[arg(long, default_value_t = 50, value_name = "N")]
+    sold_sample: u32,
 }
 
 #[derive(Debug, Args)]
@@ -267,28 +349,14 @@ struct ClassesArguments {
 }
 
 #[derive(Debug, Args)]
-struct VariantsArguments {
-    #[arg(value_name = "QUERY", num_args = 1..)]
-    query: Vec<String>,
-
-    /// How many versions to compare.
-    #[arg(long, default_value_t = 8, value_name = "N")]
-    limit: u32,
-
-    /// How many recent sales to read for each.
-    #[arg(long, default_value_t = 50, value_name = "N")]
-    sold_sample: u32,
-}
-
-#[derive(Debug, Args)]
 struct DealArguments {
     /// A reverb.com listing address, or a listing id.
     #[arg(value_name = "LISTING")]
     listing: String,
 
     /// How many recent sales to read.
-    #[arg(long, default_value_t = sold::TARGET_SAMPLE, value_name = "N")]
-    sold_sample: u32,
+    #[arg(long, value_name = "N")]
+    sold_sample: Option<u32>,
 
     #[command(flatten)]
     filters: Filters,
@@ -320,6 +388,13 @@ struct TrackArguments {
 }
 
 #[derive(Debug, Args)]
+struct ConfigArguments {
+    /// Print a commented sample file, for redirecting into the configuration path.
+    #[arg(long)]
+    example: bool,
+}
+
+#[derive(Debug, Args)]
 struct CompletionArguments {
     /// Which shell to generate for.
     #[arg(value_enum)]
@@ -347,6 +422,59 @@ fn main() {
     }
 }
 
+/// Folds the flags, the configuration file and the built-in defaults into one answer.
+///
+/// clap has already folded the environment into the flags for anything declared with
+/// `env`, so those arrive here as the flag. A setting the file gets wrong is reported and
+/// then ignored: a typo in a configuration file should cost that line, not the run.
+fn settle(cli: &Cli, loaded: config::Loaded) -> Settled {
+    let file = loaded.config;
+    let mut warnings = loaded.warnings;
+
+    let mut enumerated = |named: Option<String>, what: &str| -> Option<String> {
+        named.filter(|value| {
+            let known = match what {
+                "condition" => Condition::from_str(value, true).is_ok(),
+                _ => Format::from_str(value, true).is_ok(),
+            };
+            if !known {
+                warnings.push(format!(
+                    "the configuration file sets {what} to {value:?}, which is not one of \
+                     its values — ignoring it"
+                ));
+            }
+            known
+        })
+    };
+
+    let format = config::resolve(
+        cli.format,
+        None,
+        enumerated(file.format.clone(), "format")
+            .and_then(|value| Format::from_str(&value, true).ok()),
+        Format::Table,
+    );
+    let condition = enumerated(file.condition.clone(), "condition")
+        .and_then(|value| Condition::from_str(&value, true).ok());
+
+    Settled {
+        currency: config::resolve(
+            cli.currency.clone(),
+            None,
+            file.currency.clone(),
+            "USD".into(),
+        ),
+        format,
+        cache_ttl: config::resolve(cli.cache_ttl, None, file.cache_ttl, 360),
+        no_pager: cli.no_pager || file.no_pager.unwrap_or(false),
+        condition,
+        ships_to: file.ships_to.clone(),
+        region: file.region.clone(),
+        sold_sample: file.sold_sample,
+        warnings,
+    }
+}
+
 /// Lets the first argument be the gear itself: `gearprice "les paul"` rather than
 /// `gearprice price "les paul"`.
 ///
@@ -370,12 +498,52 @@ fn with_default_command(arguments: impl Iterator<Item = String>) -> Vec<String> 
 }
 
 fn run() -> Result<()> {
-    let cli = Cli::parse_from(with_default_command(std::env::args()));
+    let mut cli = Cli::parse_from(with_default_command(std::env::args()));
+    cli.settled = settle(&cli, config::load());
     let style = Style::new(cli.no_color);
 
     match &cli.command {
         Command::Update(arguments) => return run_update(arguments),
         Command::Cache(arguments) => return run_cache(arguments, &cli),
+        Command::Config(arguments) => {
+            if arguments.example {
+                print!("{}", config::example_config());
+                return Ok(());
+            }
+            let path = paths::config_path();
+            println!("Configuration   {}", path.display());
+            println!(
+                "                {}",
+                if path.exists() {
+                    "found"
+                } else {
+                    "not there yet — `gearprice config --example > <that path>` starts one"
+                }
+            );
+            println!();
+            println!("Settings in force, after flags, environment, file and defaults:");
+            println!("  currency      {}", cli.settled.currency);
+            println!("  format        {:?}", cli.settled.format);
+            println!("  cache TTL     {} minutes", cli.settled.cache_ttl);
+            println!(
+                "  condition     {}",
+                cli.settled
+                    .condition
+                    .map(|condition| condition.label().to_string())
+                    .unwrap_or_else(|| "used (default)".into())
+            );
+            println!(
+                "  ships to      {}",
+                cli.settled
+                    .ships_to
+                    .clone()
+                    .unwrap_or_else(|| "anywhere".into())
+            );
+            for warning in &cli.settled.warnings {
+                eprintln!("  warning: {warning}");
+            }
+            return Ok(());
+        }
         Command::Completions(arguments) => {
             let mut command = <Cli as clap::CommandFactory>::command();
             clap_complete::generate(
@@ -390,19 +558,20 @@ fn run() -> Result<()> {
     }
 
     let client = build_client(&cli)?;
-    let mut progress = Progress::new(cli.no_progress || cli.format != Format::Table);
+    let mut progress = Progress::new(cli.no_progress || cli.settled.format != Format::Table);
     client.watch(progress.counter());
 
+    // Stopped before anything renders. Rendering now blocks until the reader quits the
+    // pager, and a spinner still ticking underneath a full-screen pager is unreadable.
     let result = match &cli.command {
         Command::Price(arguments) => run_price(&cli, arguments, &client, &progress, style),
         Command::Models(arguments) => run_models(&cli, arguments, &client, &progress, style),
         Command::Listings(arguments) => run_listings(&cli, arguments, &client, &progress, style),
         Command::Classes(arguments) => run_classes(&cli, arguments, &client, &progress, style),
         Command::Deal(arguments) => run_deal(&cli, arguments, &client, &progress, style),
-        Command::Variants(arguments) => run_variants(&cli, arguments, &client, &progress, style),
         Command::Track(arguments) => run_track(&cli, arguments, &client, &progress, style),
         Command::Categories => run_categories(&cli, &client, &progress, style),
-        Command::Cache(_) | Command::Update(_) | Command::Completions(_) => {
+        Command::Cache(_) | Command::Update(_) | Command::Completions(_) | Command::Config(_) => {
             unreachable!("handled above")
         }
     };
@@ -411,7 +580,7 @@ fn run() -> Result<()> {
 }
 
 fn build_client(cli: &Cli) -> Result<Client> {
-    let currency = cli.currency.trim().to_uppercase();
+    let currency = cli.settled.currency.trim().to_uppercase();
     if currency.len() != 3
         || !currency
             .chars()
@@ -419,13 +588,13 @@ fn build_client(cli: &Cli) -> Result<Client> {
     {
         bail!(
             "currency must be a three-letter code such as USD, EUR or NOK, not {:?}",
-            cli.currency
+            cli.settled.currency
         );
     }
     let cache = (!cli.no_cache).then(|| {
         cache::ResponseCache::new(
             paths::response_cache_dir(),
-            Duration::from_secs(cli.cache_ttl.saturating_mul(60)),
+            Duration::from_secs(cli.settled.cache_ttl.saturating_mul(60)),
         )
     });
     Ok(Client::new(currency, cache, cli.request_budget))
@@ -441,7 +610,7 @@ fn apply_filters(
     filters: &Filters,
     client: &Client,
 ) -> Result<Option<Selector>> {
-    search.condition = filters.condition;
+    search.condition = filters.condition();
     search.make = filters.make.clone();
     search.year_min = filters.year_min;
     search.year_max = filters.year_max;
@@ -485,6 +654,7 @@ fn run_price(
         arguments.model_id,
         arguments.raw,
         &words,
+        cli.no_input,
         &mut warnings,
     )?;
     let model = resolution.chosen.clone();
@@ -496,7 +666,8 @@ fn run_price(
         Some(model) => Search::text(model.title.clone()),
         None => Search::text(words.clone()),
     };
-    let selector = apply_filters(&mut search, &arguments.filters, client)?;
+    let settled_filters = arguments.filters.settled(&cli.settled);
+    let selector = apply_filters(&mut search, &settled_filters, client)?;
     taxonomy::require_targeted(&search)?;
 
     progress.set("Measuring the market");
@@ -505,7 +676,7 @@ fn run_price(
     if market.is_empty() {
         warnings.push(format!(
             "no {} listings match right now — try --condition all, or a wider search",
-            arguments.filters.condition
+            settled_filters.condition()
         ));
     }
 
@@ -517,7 +688,11 @@ fn run_price(
             // Sold history is an enhancement, not a dependency. A model Reverb has no
             // transaction record for, or an endpoint that has moved again, must cost the
             // sold section and nothing else — the live market is still worth reporting.
-            let history = match sold::read(client, model.id, arguments.sold_sample) {
+            let history = match sold::read(
+                client,
+                model.id,
+                cli.settled.sold_sample(arguments.sold_sample),
+            ) {
                 Ok(history) => history,
                 Err(error) => {
                     warnings.push(format!(
@@ -558,7 +733,7 @@ fn run_price(
     let market = match model.as_ref().filter(|_| !arguments.strict) {
         Some(model) if market.total < market::WIDEN_BELOW && !market.is_empty() => {
             progress.set("Widening the search");
-            match widen(client, &search, &market, model, &arguments.filters) {
+            match widen(client, &search, &market, model, &settled_filters) {
                 Ok(Some((wider, added))) => {
                     warnings.push(format!(
                         "the catalogue entry has {} listings; a wider search found {added} more \
@@ -592,7 +767,7 @@ fn run_price(
             &model,
             &selector,
             &market,
-            &arguments.filters,
+            &settled_filters,
             &mut warnings,
         )?
     };
@@ -676,7 +851,7 @@ fn run_price(
         source: SOURCE,
         generated_at: timestamp(),
         currency: market.currency.clone(),
-        condition: arguments.filters.condition.label().to_string(),
+        condition: settled_filters.condition().label().to_string(),
         model: model.as_ref().map(ModelSummary::of),
         interpreted_as: resolution.interpreted_as.clone(),
         alternatives: resolution
@@ -694,11 +869,15 @@ fn run_price(
         diagnostics: Diagnostics::from(client.usage(), warnings),
     };
 
-    match cli.format {
-        Format::Table => output::print_price(&report, style, arguments.full),
-        Format::Json => output::print_json(&report)?,
-        Format::Csv => output::print_price_csv(&report)?,
-    }
+    progress.hush();
+    pager::paged(cli.settled.no_pager, |out| {
+        match cli.settled.format {
+            Format::Table => output::print_price(out, &report, style, arguments.full)?,
+            Format::Json => output::print_json(out, &report)?,
+            Format::Csv => output::print_price_csv(out, &report)?,
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -716,6 +895,7 @@ fn resolve_model(
     model_id: Option<u64>,
     raw: bool,
     words: &str,
+    no_input: bool,
     warnings: &mut Vec<String>,
 ) -> Result<resolve::Resolution> {
     // A pasted URL is not a search. Someone looking at a listing and asking about it has
@@ -754,7 +934,36 @@ fn resolve_model(
     if raw {
         return Ok(resolve::Resolution::none());
     }
-    let resolution = resolve::resolve(client, words, 12)?;
+    let mut resolution = resolve::resolve(client, words, 12)?;
+
+    // A near-tie is a question, and printing --model-id values is a question dressed up
+    // as output. Ask it, when there is somebody there to answer and they have not said
+    // not to. Every way out lands on the model that was going to be used anyway.
+    if !resolution.alternatives.is_empty()
+        && let Some(chosen) = resolution.chosen.clone()
+    {
+        let mut offered = vec![chosen];
+        offered.extend(resolution.alternatives.iter().cloned());
+        let picked = prompt::choose(
+            &offered,
+            |model| {
+                format!(
+                    "{:<48} {:>5} used",
+                    output::shorten(&model.title, 48),
+                    output::number(model.used_total)
+                )
+            },
+            &format!("Several models fit {words:?}:"),
+            !no_input,
+        )
+        .unwrap_or(None);
+        if let Some(index) = picked.filter(|index| *index > 0) {
+            let taken = offered.swap_remove(index);
+            resolution.alternatives.clear();
+            resolution.chosen = Some(taken);
+        }
+    }
+
     let Some(model) = resolution.chosen.as_ref() else {
         warnings.push(format!(
             "nothing in Reverb's catalogue matches {words:?}, so this prices the words \
@@ -819,7 +1028,7 @@ fn widen(
     let mut merged = market.sample.clone();
     merged.extend(extra);
     Ok(Some((
-        market::from_listings(merged, market.currency.clone(), filters.condition),
+        market::from_listings(merged, market.currency.clone(), filters.condition()),
         added,
     )))
 }
@@ -922,13 +1131,13 @@ fn price_class(
     let peers = Search {
         product_type: Some(product_type),
         category,
-        condition: filters.condition,
+        condition: filters.condition(),
         region: filters.region.as_ref().map(|code| code.to_uppercase()),
         ..Search::default()
     };
     // The peer group is named with its condition, because "the 64th percentile of
     // Electric Guitars" means something different for used gear than for new.
-    let label = format!("{} {label}", filters.condition.label());
+    let label = format!("{} {label}", filters.condition().label());
     place(client, &peers, &label, median)
 }
 
@@ -953,23 +1162,88 @@ fn run_models(
     if let Some(reading) = &resolution.interpreted_as {
         warnings.push(format!("read {words:?} as {reading:?}"));
     }
-    let models = resolution.ranked;
-    let report = ModelReport {
+    let models: Vec<CatalogueModel> = resolution
+        .ranked
+        .into_iter()
+        .take(arguments.limit as usize)
+        .collect();
+
+    // The list is for choosing between near-identical names, and what separates a
+    // Marshall guitar Major from the bass one is what each actually sells for, not their
+    // titles. So the sold column is the point of this command rather than an extra, and
+    // --quick is for when the id is all that is wanted.
+    if arguments.quick {
+        let report = ModelReport {
+            query: words,
+            source: SOURCE,
+            generated_at: timestamp(),
+            currency: client.currency().to_string(),
+            models: models
+                .iter()
+                .map(|model| ModelRow::of(model, client.currency()))
+                .collect(),
+            diagnostics: Diagnostics::from(client.usage(), warnings),
+        };
+        progress.hush();
+        pager::paged(cli.settled.no_pager, |out| match cli.settled.format {
+            Format::Table => output::print_models(out, &report, style),
+            Format::Json => output::print_json(out, &report),
+            Format::Csv => output::print_models_csv(out, &report),
+        })?;
+        return Ok(());
+    }
+    if models.is_empty() {
+        bail!("nothing in Reverb's catalogue matches {words:?}");
+    }
+
+    progress.set("Reading what each has sold for");
+    let currency = client.currency().to_string();
+    let sold: Vec<Option<sold::Sold>> = parallel::each(&models, |model| {
+        Ok(sold::read(client, model.id, arguments.sold_sample).ok())
+    })?;
+
+    let variants: Vec<VariantRow> = models
+        .iter()
+        .zip(sold)
+        .map(|(model, sold)| {
+            let sold = sold.filter(|history| !history.is_empty());
+            VariantRow {
+                id: model.id,
+                title: model.title.clone(),
+                used_listings: model.used_total,
+                new_listings: model.new_total,
+                used_from: model
+                    .used_low_price
+                    .as_ref()
+                    .map(|price| Money::from_minor(price.amount_cents).major(&currency)),
+                sold_median: sold
+                    .as_ref()
+                    .and_then(sold::Sold::median)
+                    .map(|price| price.major(&currency)),
+                sold_recent_median: sold
+                    .as_ref()
+                    .and_then(|history| history.recent_median)
+                    .map(|price| price.major(&currency)),
+                sales: sold.as_ref().map(|history| history.recorded).unwrap_or(0),
+                url: model.web_url(),
+            }
+        })
+        .collect();
+
+    let report = VariantReport {
         query: words,
         source: SOURCE,
         generated_at: timestamp(),
-        currency: client.currency().to_string(),
-        models: models
-            .iter()
-            .map(|model| ModelRow::of(model, client.currency()))
-            .collect(),
+        currency,
+        variants,
         diagnostics: Diagnostics::from(client.usage(), warnings),
     };
-    match cli.format {
-        Format::Table => output::print_models(&report, style),
-        Format::Json => output::print_json(&report)?,
-        Format::Csv => output::print_models_csv(&report)?,
-    }
+    progress.hush();
+    pager::paged(cli.settled.no_pager, |out| match cli.settled.format {
+        Format::Json => output::print_json(out, &report),
+        Format::Csv => output::print_variants_csv(out, &report),
+        Format::Table => output::print_variants(out, &report, style),
+    })?;
     Ok(())
 }
 
@@ -992,6 +1266,7 @@ fn run_listings(
         arguments.model_id,
         arguments.raw || words.is_empty(),
         &words,
+        cli.no_input,
         &mut warnings,
     )?
     .chosen;
@@ -1001,7 +1276,11 @@ fn run_listings(
         None => Search::text(words.clone()),
     };
     search.sort = arguments.sort;
-    apply_filters(&mut search, &arguments.filters, client)?;
+    apply_filters(
+        &mut search,
+        &arguments.filters.settled(&cli.settled),
+        client,
+    )?;
     taxonomy::require_targeted(&search)?;
 
     // Bands need the distribution, so measuring comes first whenever a label is wanted.
@@ -1050,7 +1329,7 @@ fn run_listings(
         source: SOURCE,
         generated_at: timestamp(),
         currency: market.currency.clone(),
-        condition: arguments.filters.condition.label().to_string(),
+        condition: arguments.filters.condition().label().to_string(),
         matched: market.total,
         shown: listings.len(),
         delivered_to: search.ships_to.clone(),
@@ -1073,11 +1352,15 @@ fn run_listings(
             .collect(),
         diagnostics: Diagnostics::from(client.usage(), warnings),
     };
-    match cli.format {
-        Format::Table => output::print_listings(&report, style),
-        Format::Json => output::print_json(&report)?,
-        Format::Csv => output::print_listings_csv(&report)?,
-    }
+    progress.hush();
+    pager::paged(cli.settled.no_pager, |out| {
+        match cli.settled.format {
+            Format::Table => output::print_listings(out, &report, style)?,
+            Format::Json => output::print_json(out, &report)?,
+            Format::Csv => output::print_listings_csv(out, &report)?,
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -1128,11 +1411,15 @@ fn run_classes(
         classes,
         diagnostics: Diagnostics::from(client.usage(), Vec::new()),
     };
-    match cli.format {
-        Format::Table => output::print_classes(&report, style),
-        Format::Json => output::print_json(&report)?,
-        Format::Csv => output::print_classes_csv(&report)?,
-    }
+    progress.hush();
+    pager::paged(cli.settled.no_pager, |out| {
+        match cli.settled.format {
+            Format::Table => output::print_classes(out, &report, style)?,
+            Format::Json => output::print_json(out, &report)?,
+            Format::Csv => output::print_classes_csv(out, &report)?,
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -1142,82 +1429,6 @@ fn run_classes(
 /// Marshall's guitar Major is Model 1967 and the bass Major is Model 1978, both called
 /// "Major", both 200 watts, and their markets are nothing alike. Pricing one when you
 /// hold the other is an easy and expensive mistake.
-fn run_variants(
-    cli: &Cli,
-    arguments: &VariantsArguments,
-    client: &Client,
-    progress: &Progress,
-    style: Style,
-) -> Result<()> {
-    let words = arguments.query.join(" ").trim().to_string();
-    if words.is_empty() {
-        bail!("say which model to compare versions of");
-    }
-    progress.set("Finding the versions");
-    let resolution = resolve::resolve(client, &words, arguments.limit.min(MAX_PER_PAGE))?;
-    let mut warnings = Vec::new();
-    if let Some(reading) = &resolution.interpreted_as {
-        warnings.push(format!("read {words:?} as {reading:?}"));
-    }
-    let models: Vec<CatalogueModel> = resolution
-        .ranked
-        .into_iter()
-        .take(arguments.limit as usize)
-        .collect();
-    if models.is_empty() {
-        bail!("nothing in Reverb's catalogue matches {words:?}");
-    }
-
-    progress.set("Reading what each has sold for");
-    let currency = client.currency().to_string();
-    let sold: Vec<Option<sold::Sold>> = parallel::each(&models, |model| {
-        Ok(sold::read(client, model.id, arguments.sold_sample).ok())
-    })?;
-
-    let variants: Vec<VariantRow> = models
-        .iter()
-        .zip(sold)
-        .map(|(model, sold)| {
-            let sold = sold.filter(|history| !history.is_empty());
-            VariantRow {
-                id: model.id,
-                title: model.title.clone(),
-                used_listings: model.used_total,
-                new_listings: model.new_total,
-                used_from: model
-                    .used_low_price
-                    .as_ref()
-                    .map(|price| Money::from_minor(price.amount_cents).major(&currency)),
-                sold_median: sold
-                    .as_ref()
-                    .and_then(sold::Sold::median)
-                    .map(|price| price.major(&currency)),
-                sold_recent_median: sold
-                    .as_ref()
-                    .and_then(|history| history.recent_median)
-                    .map(|price| price.major(&currency)),
-                sales: sold.as_ref().map(|history| history.recorded).unwrap_or(0),
-                url: model.web_url(),
-            }
-        })
-        .collect();
-
-    let report = VariantReport {
-        query: words,
-        source: SOURCE,
-        generated_at: timestamp(),
-        currency,
-        variants,
-        diagnostics: Diagnostics::from(client.usage(), warnings),
-    };
-    match cli.format {
-        Format::Json => output::print_json(&report)?,
-        Format::Csv => output::print_variants_csv(&report)?,
-        Format::Table => output::print_variants(&report, style),
-    }
-    Ok(())
-}
-
 /// Judges one listing against what its model actually sells for.
 fn run_deal(
     cli: &Cli,
@@ -1254,13 +1465,17 @@ fn run_deal(
     let model = client.model(model_id)?;
 
     progress.set("Reading what it has sold for");
-    let sold = sold::read(client, model_id, arguments.sold_sample)?;
+    let sold = sold::read(
+        client,
+        model_id,
+        cli.settled.sold_sample(arguments.sold_sample),
+    )?;
 
     let mut search = Search::products(model.product_ids());
-    let mut filters = arguments.filters.clone();
+    let mut filters = arguments.filters.settled(&cli.settled);
     // Judged against its own condition where the record is thick enough to support it,
     // because a mint example and a beaten one are not the same market.
-    filters.condition = Condition::Used;
+    filters.condition = Some(Condition::Used);
     apply_filters(&mut search, &filters, client)?;
     progress.set("Measuring the market");
     let market = measure(client, &search)?;
@@ -1312,10 +1527,14 @@ fn run_deal(
         market: MarketSummary::of(&market),
         diagnostics: Diagnostics::from(client.usage(), warnings),
     };
-    match cli.format {
-        Format::Json => output::print_json(&report)?,
-        _ => output::print_deal(&report, style),
-    }
+    progress.hush();
+    pager::paged(cli.settled.no_pager, |out| {
+        match cli.settled.format {
+            Format::Json => output::print_json(out, &report)?,
+            _ => output::print_deal(out, &report, style)?,
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -1344,10 +1563,14 @@ fn run_track(
                 })
                 .collect(),
         };
-        match cli.format {
-            Format::Json => output::print_json(&report)?,
-            _ => output::print_tracked(&report, style),
-        }
+        progress.hush();
+        pager::paged(cli.settled.no_pager, |out| {
+            match cli.settled.format {
+                Format::Json => output::print_json(out, &report)?,
+                _ => output::print_tracked(out, &report, style)?,
+            }
+            Ok(())
+        })?;
         return Ok(());
     }
 
@@ -1363,6 +1586,7 @@ fn run_track(
         arguments.model_id,
         arguments.raw,
         &words,
+        cli.no_input,
         &mut warnings,
     )?;
     let model = resolution.chosen.clone();
@@ -1372,7 +1596,8 @@ fn run_track(
         Some(model) => Search::text(model.title.clone()),
         None => Search::text(words.clone()),
     };
-    apply_filters(&mut search, &arguments.filters, client)?;
+    let tracked_filters = arguments.filters.settled(&cli.settled);
+    apply_filters(&mut search, &tracked_filters, client)?;
     taxonomy::require_targeted(&search)?;
 
     progress.set("Measuring the market");
@@ -1389,7 +1614,7 @@ fn run_track(
             .map(|model| model.title.clone())
             .unwrap_or_else(|| words.clone()),
         currency: market.currency.clone(),
-        condition: arguments.filters.condition,
+        condition: tracked_filters.condition(),
         ships_to: search.ships_to.clone(),
     };
     // Recorded alongside the asking median, so a history built now can answer "what was
@@ -1423,43 +1648,52 @@ fn run_track(
         source: SOURCE,
         generated_at: timestamp(),
         currency: market.currency.clone(),
-        condition: arguments.filters.condition.label().to_string(),
+        condition: tracked_filters.condition().label().to_string(),
         model: model.as_ref().map(ModelSummary::of),
         recorded: !arguments.no_record,
         readings: readings.iter().map(Reading::of).collect(),
         movement,
         diagnostics: Diagnostics::from(client.usage(), warnings),
     };
-    match cli.format {
-        Format::Json => output::print_json(&report)?,
-        _ => output::print_track(&report, style),
-    }
+    progress.hush();
+    pager::paged(cli.settled.no_pager, |out| {
+        match cli.settled.format {
+            Format::Json => output::print_json(out, &report)?,
+            _ => output::print_track(out, &report, style)?,
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
 fn run_categories(cli: &Cli, client: &Client, progress: &Progress, style: Style) -> Result<()> {
     progress.set("Reading the category tree");
     let taxonomy = Taxonomy::load(client)?;
-    match cli.format {
-        Format::Json => output::print_json(&serde_json::json!({
-            "categories": taxonomy.roots().iter().map(|root| serde_json::json!({
-                "slug": root.slug,
-                "name": root.name,
-                "subcategories": root.subcategories.iter().map(|leaf| serde_json::json!({
-                    "slug": leaf.slug,
-                    "name": leaf.name,
-                })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>()
-        }))?,
+    progress.hush();
+    pager::paged(cli.settled.no_pager, |out| match cli.settled.format {
+        Format::Json => output::print_json(
+            out,
+            &serde_json::json!({
+                "categories": taxonomy.roots().iter().map(|root| serde_json::json!({
+                    "slug": root.slug,
+                    "name": root.name,
+                    "subcategories": root.subcategories.iter().map(|leaf| serde_json::json!({
+                        "slug": leaf.slug,
+                        "name": leaf.name,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>()
+            }),
+        ),
         _ => {
             for root in taxonomy.roots() {
-                println!("{}", style_root(&root.slug, &root.name, style));
+                writeln!(out, "{}", style_root(&root.slug, &root.name, style))?;
                 for leaf in &root.subcategories {
-                    println!("    {:<28} {}", leaf.slug, leaf.name);
+                    writeln!(out, "    {:<28} {}", leaf.slug, leaf.name)?;
                 }
             }
+            Ok(())
         }
-    }
+    })?;
     Ok(())
 }
 
@@ -1474,7 +1708,7 @@ fn style_root(slug: &str, name: &str, _style: Style) -> String {
 fn run_cache(arguments: &CacheArguments, cli: &Cli) -> Result<()> {
     let cache = cache::ResponseCache::new(
         paths::response_cache_dir(),
-        Duration::from_secs(cli.cache_ttl.saturating_mul(60)),
+        Duration::from_secs(cli.settled.cache_ttl.saturating_mul(60)),
     );
     if arguments.clear {
         let removed = cache.clear()?;
@@ -1488,7 +1722,10 @@ fn run_cache(arguments: &CacheArguments, cli: &Cli) -> Result<()> {
     println!("Cache      {}", cache.directory().display());
     println!("Entries    {}", output::number(entries as u32));
     println!("Size       {:.1} MB", bytes as f64 / 1_048_576.0);
-    println!("Good for   {} minutes after each response", cli.cache_ttl);
+    println!(
+        "Good for   {} minutes after each response",
+        cli.settled.cache_ttl
+    );
     Ok(())
 }
 
@@ -1528,6 +1765,57 @@ mod tests {
     use classify::Segment;
 
     #[test]
+    fn a_setting_in_the_file_is_used_only_when_the_flag_is_silent() {
+        let file = config::Loaded {
+            config: config::Config {
+                currency: Some("NOK".into()),
+                cache_ttl: Some(30),
+                ..config::Config::default()
+            },
+            warnings: Vec::new(),
+        };
+        // Nothing on the command line, so the file decides.
+        let quiet = Cli::parse_from(["gearprice", "categories"]);
+        let settled = settle(&quiet, file.clone());
+        assert_eq!("NOK", settled.currency);
+        assert_eq!(30, settled.cache_ttl);
+
+        // A flag always wins, which is the whole of clig.dev's precedence rule.
+        let asked = Cli::parse_from(["gearprice", "--currency", "EUR", "categories"]);
+        assert_eq!("EUR", settle(&asked, file).currency);
+
+        // And with neither, the built-in default.
+        let bare = Cli::parse_from(["gearprice", "categories"]);
+        let settled = settle(&bare, config::Loaded::default());
+        assert_eq!("USD", settled.currency);
+        assert_eq!(360, settled.cache_ttl);
+    }
+
+    #[test]
+    fn a_setting_the_file_gets_wrong_costs_that_line_and_not_the_run() {
+        let file = config::Loaded {
+            config: config::Config {
+                condition: Some("nonsense".into()),
+                currency: Some("NOK".into()),
+                ..config::Config::default()
+            },
+            warnings: Vec::new(),
+        };
+        let settled = settle(&Cli::parse_from(["gearprice", "categories"]), file);
+        // The bad line is dropped and named, and the good one still applies.
+        assert_eq!(None, settled.condition);
+        assert_eq!("NOK", settled.currency);
+        assert!(
+            settled
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("condition")),
+            "{:?}",
+            settled.warnings
+        );
+    }
+
+    #[test]
     fn the_gear_can_come_first_without_naming_the_command() {
         let filled = |arguments: &[&str]| {
             with_default_command(arguments.iter().map(|value| value.to_string()))
@@ -1561,14 +1849,16 @@ mod tests {
 
     #[test]
     fn a_currency_that_is_not_a_code_is_refused_before_any_request() {
-        let cli = Cli::parse_from(["gearprice", "--currency", "dollars", "categories"]);
+        let mut cli = Cli::parse_from(["gearprice", "--currency", "dollars", "categories"]);
+        cli.settled = settle(&cli, config::Loaded::default());
         let error = match build_client(&cli) {
             Err(error) => error.to_string(),
             Ok(_) => panic!("expected a currency that is not a code to be refused"),
         };
         assert!(error.contains("three-letter code"), "{error}");
         // A lowercase code is a spelling, not a mistake.
-        let cli = Cli::parse_from(["gearprice", "--currency", "nok", "categories"]);
+        let mut cli = Cli::parse_from(["gearprice", "--currency", "nok", "categories"]);
+        cli.settled = settle(&cli, config::Loaded::default());
         let client = build_client(&cli).expect("a lowercase code is valid");
         assert_eq!("NOK", client.currency());
     }
@@ -1580,7 +1870,7 @@ mod tests {
             panic!("expected the price command")
         };
         assert_eq!("Gibson Les Paul", arguments.query.join(" "));
-        assert_eq!(Condition::Used, arguments.filters.condition);
+        assert_eq!(Condition::Used, arguments.filters.condition());
         assert!(!arguments.raw);
     }
 

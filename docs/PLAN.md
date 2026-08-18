@@ -209,6 +209,31 @@ non-interactive stdout keep the current behaviour so scripts and pipes are unaff
 5. ~~`variants`.~~ Done.
 6. Interactive picking — the one item still outstanding.
 
+## The polish round
+
+Driven by clig.dev rather than taste, after using the tool cold and finding it dense,
+slow in one place, and repetitive to invoke.
+
+- **Paging.** clig: invoke a pager for substantial output, but only when stdout is a
+  terminal, with `less -FIRX`. Blocked until now because `output.rs` printed with
+  `println!` and the crate denies `unsafe`, so the `dup2` trick is out. The fix is to
+  render into a buffer and hand it to a pager or to stdout.
+- **Interactive picking.** clig: prompt only when stdin is a TTY, honour `--no-input`,
+  never require the prompt. A numbered list read from stdin, no new dependency.
+- **Configuration file.** clig's precedence: flags, then environment, then user config,
+  then defaults. XDG path. A malformed config must warn rather than stop a run — a typo
+  in a config file should not stop somebody pricing a guitar.
+- **`models` and `variants` are too close a pair**, which clig warns about directly.
+  Measured: `models` is one request and instant, `variants` is nine and about two
+  seconds, and both answer "which of these did I mean". They merge into `models`, with
+  the sold column shown by default because that is what makes the list useful for
+  choosing, and `--quick` to skip the sold lookups. One fewer command, no ambiguity.
+- ~~**Paging.**~~ Done. ~~**Interactive picking.**~~ Done. ~~**Configuration file.**~~ Done.
+  ~~**`models` and `variants`.**~~ Merged.
+- **The remaining concurrency ceiling.** Tracing showed 128 seconds of request latency
+  inside 24 of wall clock, about four wide, continuously busy. Reverb, our pacing and
+  ureq's idle-connection pool have each been measured and ruled out.
+
 ## Things worth not breaking
 
 - The counting engine's exactness, and its offline tests against synthetic populations.
