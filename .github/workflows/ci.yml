@@ -71,6 +71,22 @@ jobs:
           key: msrv-1.88
       - run: cargo +1.88 check --all-targets --locked
 
+  # A tool people install from a tap and run against their own machine should not be
+  # shipping a known vulnerable dependency. This catches one on the push that introduces
+  # it, rather than whenever somebody happens to look at the security tab.
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - run: cargo audit --deny warnings
+
   docs:
     name: rustdoc
     runs-on: ubuntu-latest

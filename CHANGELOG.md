@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `gearprice --model-id 137981` works without naming the `price` command, which is the
+  natural way to price a model `gearprice models` has just printed the id of.
+
+### Fixed
+
 - A run could hang indefinitely when several models fit a query. The prompt asking which
   one was meant was drawn underneath a spinner that rewrote the same line several times a
   second, so the question was wiped before it could be read and the command sat waiting on
