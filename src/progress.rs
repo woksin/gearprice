@@ -90,6 +90,21 @@ impl Progress {
         }
     }
 
+    /// Stops the spinner and wipes its line without waiting for the worker to be joined.
+    ///
+    /// Callable while the report still holds the progress by shared reference, which is
+    /// what rendering needs: output now blocks until the reader quits the pager, and a
+    /// spinner ticking away underneath a full-screen pager is unreadable.
+    pub fn hush(&self) {
+        if !self.enabled {
+            return;
+        }
+        self.stopped.store(true, Ordering::Relaxed);
+        let mut stderr = io::stderr().lock();
+        let _ = write!(stderr, "\r\x1b[2K");
+        let _ = stderr.flush();
+    }
+
     /// Stops the spinner and wipes its line, so report output starts on a clean row.
     pub fn finish(&mut self) {
         if !self.enabled {
@@ -125,6 +140,9 @@ mod tests {
         progress.counter().store(3, Ordering::Relaxed);
         assert_eq!(3, progress.counter().load(Ordering::Relaxed));
         progress.set("anything");
+        // Hushing a spinner that was never drawn is a no-op rather than a panic, which
+        // matters because every report calls it before rendering.
+        progress.hush();
         progress.finish();
         // Finishing twice is safe, which matters because Drop finishes it again.
         progress.finish();

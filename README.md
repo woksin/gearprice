@@ -165,25 +165,6 @@ GEARPRICE  1969 Marshall Major 200 Watt Amp…VERY RARE
   Listed for              5 months  a long wait at this price
 ```
 
-### `gearprice variants` — which version is it?
-
-Reverb splits a model by era and by variant, and the differences are not cosmetic:
-
-```console
-$ gearprice variants "Marshall Major"
-```
-
-```
-  Version                                        Used Asking from        Sold   Sales
-  ──────────────────────────────────────────────────────────────────────────────────────────
-  Marshall JMP Model 1967 "Major" 200-Watt Gu…      6      $4,300      $4,100      39
-  Marshall JMP Model 1978 "Major" 200-Watt Ba…      1      $3,990      $2,645       6
-```
-
-Both are called "Major", both are 200 watts, and one sells for half again what the other
-does. Model 1967 is the guitar amp and Model 1978 is the bass amp — those are Marshall's
-model numbers, not years, which is a trap Reverb's own year field falls into.
-
 ### `gearprice price` — what one model costs
 
 The main one. Resolves what you typed to a model in Reverb's catalogue, measures its
@@ -257,21 +238,29 @@ gearprice classes electric-guitars/semi-hollow
 gearprice classes amps --condition new
 ```
 
-### `gearprice models` — find the exact model
+### `gearprice models` — which version is it?
 
-```bash
-gearprice models "les paul standard"
+Reverb splits a model by era and by variant, and the differences are not cosmetic:
+
+```console
+$ gearprice models "marshall major"
 ```
 
 ```
-  Model                                              Used   Used from    New    New from
+  Version                                        Used Asking from        Sold   Sales
   ──────────────────────────────────────────────────────────────────────────────────────────
-  Gibson Les Paul Standard '60s (2019 - Present)      190      $1,750    241      $2,399
-  Gibson Les Paul Standard '50s (2019 - Present)      183      $1,650    205      $2,299
-  Gibson Les Paul Standard 1990 - 2001                135      $1,299      0           —
-  Epiphone Les Paul Standard '60s (2020 - Present)     38        $250    103        $499
-  Gibson Custom Shop '59 Les Paul Standard Reissu…     72      $3,999     99      $5,899
+  Marshall JMP Model 1967 "Major" 200-Watt Gu…      6      $4,300      $4,100      39
+  Marshall JMP Model 1978 "Major" 200-Watt Ba…      1      $3,990      $2,645       6
 ```
+
+Both are called "Major", both are 200 watts, and one sells for half again what the other
+does. Model 1967 is the guitar amp and 1978 is the bass amp — Marshall's model numbers,
+not years, which is a trap Reverb's own year field falls into. `--quick` drops the sold
+column and the eight lookups behind it, when all you want is an id.
+
+When several models fit and there is somebody there to answer, gearprice asks which one
+rather than printing ids to copy. `--no-input` turns that off, a pipe never triggers it,
+and `--model-id` always answers it in advance.
 
 ### `gearprice listings` — what is for sale, labelled
 
@@ -315,11 +304,28 @@ throw away the one thing that cannot be fetched again. A reading is only ever co
 against others of the same question: same currency, same condition, same destination. A
 median in kroner beside one in dollars is not a price movement.
 
+### Settings you would otherwise retype
+
+```console
+$ gearprice config --example > ~/.config/gearprice/config.toml
+```
+
+```toml
+currency = "NOK"
+ships_to = "NO"
+```
+
+Flags beat environment variables beat the file beats the defaults. `gearprice config`
+shows where the file is and what is actually in force. A typo in it costs that line and
+names it, never the run.
+
 ### Odds and ends
 
-`gearprice completions zsh` (or `bash`, `fish`, `powershell`, `elvish`) prints a
-completion script. And the first argument can be the gear itself — `gearprice "les paul"`
-is `gearprice price "les paul"`.
+Long reports go to a pager when there is a terminal to read them, `less -F -I -R -X` or
+whatever `PAGER` says. `--no-pager` prints straight out, and a pipe never pages.
+`gearprice completions zsh` (or `bash`, `fish`, `powershell`, `elvish`) prints a completion
+script. And the first argument can be the gear itself — `gearprice "les paul"` is
+`gearprice price "les paul"`.
 
 ### `gearprice categories` — the category tree
 
@@ -458,6 +464,8 @@ Stated plainly, because a price is only as good as what you know about it.
 | `--cache-ttl MINUTES` | `360` | How long a cached response stays good. `GEARPRICE_CACHE_TTL` |
 | `--request-budget N` | `400` | Hard ceiling on API requests for one run |
 | `--no-progress`, `--no-color` | | Also honours `NO_COLOR` and `GEARPRICE_NO_PROGRESS` |
+| `--no-pager` | | Print long reports straight out. A pipe never pages anyway |
+| `--no-input` | | Never stop to ask which model was meant |
 
 ### Filters
 
@@ -495,6 +503,8 @@ reporting the wrong population.
 |---|---|
 | `GEARPRICE_CURRENCY` | Default display currency |
 | `GEARPRICE_SHIPS_TO` | Default shipping destination |
+| `GEARPRICE_CONFIG` | Configuration file. Defaults to `$XDG_CONFIG_HOME/gearprice/config.toml` or `~/.config/gearprice/config.toml` |
+| `PAGER` | The pager for long reports. `less -F -I -R -X` by default |
 | `GEARPRICE_HISTORY` | Tracking history file. Defaults to `$XDG_DATA_HOME/gearprice/history.jsonl` or `~/.local/share/gearprice/history.jsonl` |
 | `GEARPRICE_CACHE_DIR` | Cache location. Defaults to `$XDG_CACHE_HOME/gearprice` or `~/.cache/gearprice` |
 | `GEARPRICE_CACHE_TTL` | Default cache lifetime in minutes |

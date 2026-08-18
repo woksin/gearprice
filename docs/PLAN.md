@@ -228,6 +228,8 @@ slow in one place, and repetitive to invoke.
   seconds, and both answer "which of these did I mean". They merge into `models`, with
   the sold column shown by default because that is what makes the list useful for
   choosing, and `--quick` to skip the sold lookups. One fewer command, no ambiguity.
+- ~~**Paging.**~~ Done. ~~**Interactive picking.**~~ Done. ~~**Configuration file.**~~ Done.
+  ~~**`models` and `variants`.**~~ Merged.
 - **The remaining concurrency ceiling.** Tracing showed 128 seconds of request latency
   inside 24 of wall clock, about four wide, continuously busy. Reverb, our pacing and
   ureq's idle-connection pool have each been measured and ruled out.
