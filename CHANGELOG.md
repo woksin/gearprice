@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Corrected the claim that sold prices are unobtainable. Reverb's Price Guide endpoint is
+  retired, but sold history is public at `/api/comparison_shopping_pages/{id}/transactions`
+  and returns both the asking price and the final price for each sale. Asking prices run
+  16–46% above sold depending on the model, so every band this tool currently reports
+  reads high. `docs/PLAN.md` sets out the rebuild.
+
 ### Added
 
 - Spelling correction for queries, against Reverb's own vocabulary of every brand and

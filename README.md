@@ -77,22 +77,33 @@ No account, no API key, no configuration. It reads Reverb's public marketplace.
 
 ---
 
-## Asking prices, not sold prices
+## Asking prices — for now
 
-Every number gearprice reports comes from listings that are for sale **right now**. They
-are what sellers are asking, not what anything sold for.
+Every number gearprice currently reports comes from listings that are for sale **right
+now**. They are what sellers are asking, not what anything sold for.
 
-This is not a design choice. Reverb's public Price Guide endpoint — the one that carried
-transaction history — was retired, and now answers every request, credentialled or not,
-with `403 This endpoint is no longer publicly available`. Sold-price data is not
-obtainable through the public API by any tool, gearprice included.
+**This is a known limitation, not a design choice, and it is being fixed.** An earlier
+version of this README claimed sold prices were unobtainable because Reverb retired its
+public Price Guide. The Price Guide is indeed dead — `/api/priceguide` answers `403` to
+everyone — but sold data moved rather than vanished, to
+`/api/comparison_shopping_pages/{id}/transactions`, which is public and returns both what
+each item was listed at and what it actually sold for.
 
-Asking prices are still the most useful signal available, and for a buyer they are the
-one that matters: they are the prices you can actually act on today. But they run above
-what gear changes hands for, and a model nobody is buying can hold a high asking price
-indefinitely. gearprice says which it is showing on every report rather than letting the
-distinction blur. Treat a band as *"how does this compare to what everyone else wants for
-it"*, not *"what is it worth"*.
+That matters, because asking prices run well above what people pay:
+
+| Model | Asking median | Sold median | Gap |
+|---|---|---|---|
+| Gibson Les Paul Standard '60s | $2,223 | $1,868 | −16% |
+| Fender American Professional II Stratocaster | $1,573 | $1,250 | −21% |
+| Marshall JMP Major (guitar) | $5,384 | $2,900 | −46% |
+
+So read every band below as *"how does this compare to what everyone else is asking"*,
+and knock something off for what it is likely to trade at. [docs/PLAN.md](docs/PLAN.md)
+sets out the rebuild that makes sold prices the primary number.
+
+Until then the most useful thing here is the clearing signal: what is priced where the
+market clears leaves, and what is priced above it sits. gearprice reports how long the
+listings in each band have been waiting, which says which asking prices are being ignored.
 
 ---
 
@@ -359,8 +370,8 @@ themselves. Both paths report the same percentiles, and the report says which on
 
 Stated plainly, because a price is only as good as what you know about it.
 
-- **Asking, not sold.** Covered [above](#asking-prices-not-sold-prices). The single most
-  important caveat.
+- **Asking, not sold.** Covered [above](#asking-prices--for-now). Sold prices are
+  obtainable and are being built in; until then every band here reads high.
 - **A model is not a condition.** A `used` band spans mint to fair. A mint example at the
   top of the `fair` band may be the better buy than a beaten one at the bottom. Narrow it
   with `--condition excellent` when the market is big enough to support it.

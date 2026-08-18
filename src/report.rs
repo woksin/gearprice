@@ -14,8 +14,12 @@ use crate::money::Money;
 use crate::reverb::{CatalogueModel, Listing, Usage};
 
 /// Said plainly and attached to every report: these are prices people are *asking*, not
-/// prices anything *sold* for. Reverb retired its public sold-price endpoint, and a tool
-/// that blurred the two would be worse than useless for deciding what to pay.
+/// prices anything *sold* for, and asking runs 16–46% above sold depending on the model.
+///
+/// Reverb's Price Guide endpoint is retired, but sold history is still public at
+/// `/api/comparison_shopping_pages/{id}/transactions`. Reporting sold as the primary
+/// number is the next piece of work — see `docs/PLAN.md`. Until it lands this caveat has
+/// to carry the whole weight of the difference.
 pub const SOURCE: &str = "live Reverb listings — asking prices, not sold prices";
 
 /// The same caveat, short enough for a table header.

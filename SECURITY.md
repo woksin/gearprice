@@ -10,8 +10,8 @@ open a public issue.
 
 `gearprice` makes requests to exactly two hosts, both over HTTPS:
 
-- `api.reverb.com` — the public Reverb marketplace API, for every price and
-  category lookup. These endpoints need no credentials, and gearprice sends
+- `api.reverb.com` — the public Reverb marketplace API, for every price, sold-history
+  and category lookup. These endpoints need no credentials, and gearprice sends
   none. It has no notion of a Reverb account, never signs in, and never reads a
   credential store, so there is nothing of yours for it to leak.
 - `api.github.com` and the GitHub release CDN — only when you run
