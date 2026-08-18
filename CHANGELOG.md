@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Sold prices, read from `/api/comparison_shopping_pages/{id}/transactions`. Bands are now
+  cut from what people actually paid, with asking prices shown beside them as the
+  negotiating position, and the typical discount off asking reported with the spread.
+- A recent median quoted beside the overall one where a model's record runs back years,
+  because a twelve-year median describes a market nobody is buying in.
+- Sold medians per condition grade, which order correctly where asking prices did not.
+- `--sold-sample` and `--no-sold`. `track` records sold medians alongside asking.
+
 ### Fixed
 
 - Corrected the claim that sold prices are unobtainable. Reverb's Price Guide endpoint is

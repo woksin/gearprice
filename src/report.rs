@@ -7,11 +7,12 @@
 
 use serde::Serialize;
 
-use crate::classify::{Band, Bands, Placement, Segment};
+use crate::classify::{Band, Bands, Basis, Placement, Segment};
 use crate::history::{Movement, Snapshot};
 use crate::market::Market;
 use crate::money::Money;
 use crate::reverb::{CatalogueModel, Listing, Usage};
+use crate::sold::Sold;
 
 /// Said plainly and attached to every report: these are prices people are *asking*, not
 /// prices anything *sold* for, and asking runs 16–46% above sold depending on the model.
@@ -41,6 +42,9 @@ pub struct PriceReport {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub alternatives: Vec<AlternativeModel>,
     pub market: MarketSummary,
+    /// What the model has actually sold for, where Reverb has a record of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sold: Option<SoldSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bands: Option<BandTable>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +174,94 @@ impl MarketSummary {
     }
 }
 
+/// What people paid, as against what sellers want.
+#[derive(Debug, Serialize)]
+pub struct SoldSummary {
+    /// Sales Reverb has on record for this model.
+    pub recorded: u32,
+    /// How many of them this report read.
+    pub read: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covering: Option<String>,
+    pub percentiles: Vec<PercentilePoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median: Option<f64>,
+    /// The median of the last year, where the record runs back far enough that the
+    /// overall median describes an older market.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_median: Option<f64>,
+    pub recent_sales: usize,
+    /// How far the asking median sits above the sold median, as a fraction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asking_premium: Option<f64>,
+    /// Where the asking median falls among prices people actually paid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asking_percentile: Option<u32>,
+    /// Median of what buyers got off the asking price. Negative is a discount.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub typical_discount: Option<f64>,
+    pub sales_with_both_prices: usize,
+    pub sold_at_or_above_ask: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub grades: Vec<GradeCount>,
+}
+
+impl SoldSummary {
+    pub fn of(sold: &Sold, market: &Market) -> Self {
+        let currency = sold.currency.as_str();
+        let median = sold.median().map(|price| price.major(currency));
+        let asking = market.median().map(|price| price.major(currency));
+        Self {
+            recorded: sold.recorded,
+            read: sold.sales.len(),
+            covering: sold
+                .covering
+                .as_ref()
+                .map(|(oldest, newest)| format!("{oldest} to {newest}")),
+            percentiles: sold
+                .percentiles
+                .iter()
+                .map(|(fraction, price)| PercentilePoint {
+                    percentile: (fraction * 100.0).round() as u32,
+                    price: price.major(currency),
+                })
+                .collect(),
+            median,
+            recent_median: sold.recent_median.map(|price| price.major(currency)),
+            recent_sales: sold.recent_sales,
+            asking_premium: median
+                .zip(asking)
+                .filter(|(sold, _)| *sold > 0.0)
+                .map(|(sold, asking)| (asking - sold) / sold),
+            asking_percentile: asking.map(|asking| {
+                let below = sold
+                    .sales
+                    .iter()
+                    .filter(|sale| sale.paid.major(currency) <= asking)
+                    .count();
+                if sold.sales.is_empty() {
+                    0
+                } else {
+                    ((below as f64 / sold.sales.len() as f64) * 100.0).round() as u32
+                }
+            }),
+            typical_discount: sold.typical_discount,
+            sales_with_both_prices: sold.discounts_seen,
+            sold_at_or_above_ask: sold.at_or_above_ask,
+            grades: sold
+                .grades
+                .iter()
+                .map(|grade| GradeCount {
+                    grade: grade.grade.clone(),
+                    listings: grade.sales,
+                    median: grade.median.major(currency),
+                    against_median: median.map(|overall| grade.median.major(currency) - overall),
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct PercentilePoint {
     pub percentile: u32,
@@ -196,6 +288,8 @@ pub struct HistogramBand {
 
 #[derive(Debug, Serialize)]
 pub struct BandTable {
+    /// Whether these bands were cut from what people paid or what sellers ask.
+    pub basis: Basis,
     pub bands: Vec<BandRow>,
 }
 
@@ -203,6 +297,7 @@ impl BandTable {
     pub fn of(bands: &Bands, market: &Market) -> Self {
         let currency = market.currency.as_str();
         Self {
+            basis: bands.basis,
             bands: Band::ALL
                 .into_iter()
                 .map(|band| {
@@ -213,8 +308,18 @@ impl BandTable {
                         from: from.map(|price| price.major(currency)),
                         to: to.map(|price| price.major(currency)),
                         share: high - low,
+                        // The asking price at the same percentile, so a reader holding a
+                        // listing can see which sold band it corresponds to.
+                        asking_from: (bands.basis == Basis::Sold)
+                            .then(|| market.percentile(low))
+                            .flatten()
+                            .map(|price| price.major(currency)),
+                        asking_to: (bands.basis == Basis::Sold)
+                            .then(|| market.percentile(high))
+                            .flatten()
+                            .map(|price| price.major(currency)),
                         days_listed: market.days_listed_between(from, to),
-                        verdict: band.verdict().to_string(),
+                        verdict: band.verdict(bands.basis).to_string(),
                     }
                 })
                 .collect(),
@@ -230,6 +335,11 @@ pub struct BandRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<f64>,
     pub share: f64,
+    /// The asking price at the same percentile, when the bands were cut from sold prices.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asking_from: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asking_to: Option<f64>,
     /// Median days the listings in this band have been on the market. The signal that
     /// separates a price people pay from a price people ignore.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -262,6 +372,8 @@ impl ClassSummary {
 pub struct AskingVerdict {
     pub price: f64,
     pub band: Band,
+    /// Whether the verdict is against what people paid or what sellers ask.
+    pub basis: Basis,
     pub verdict: String,
     /// Difference from the median: negative is below it.
     pub against_median: f64,
@@ -429,6 +541,9 @@ pub struct Reading {
     pub listings: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub median: Option<f64>,
+    /// What it was selling for at the time, where that was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median_sold: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub median_days_listed: Option<i64>,
 }
@@ -441,6 +556,7 @@ impl Reading {
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             listings: snapshot.listings,
             median: snapshot.median(),
+            median_sold: snapshot.median_sold,
             median_days_listed: snapshot.median_days_listed,
         }
     }

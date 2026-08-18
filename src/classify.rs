@@ -20,6 +20,7 @@ use crate::market::Market;
 use crate::money::Money;
 use crate::query::Search;
 use crate::reverb::Client;
+use crate::sold::Sold;
 
 /// Where an asking price sits within its own model's market.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -62,13 +63,38 @@ impl Band {
         }
     }
 
-    pub fn verdict(self) -> &'static str {
+    /// What it means to land in this band, said in terms of whichever prices drew it.
+    pub fn verdict(self, basis: Basis) -> &'static str {
+        match (self, basis) {
+            (Self::Steal, Basis::Sold) => "below almost anything anyone has paid",
+            (Self::Low, Basis::Sold) => "under three quarters of recent sales",
+            (Self::Fair, Basis::Sold) => "the middle half of what people paid",
+            (Self::High, Basis::Sold) => "over three quarters of recent sales",
+            (Self::Premium, Basis::Sold) => "above almost anything anyone has paid",
+            (Self::Steal, Basis::Asking) => "below almost every other asking price",
+            (Self::Low, Basis::Asking) => "cheaper than three quarters of the market",
+            (Self::Fair, Basis::Asking) => "in the middle half — the going rate",
+            (Self::High, Basis::Asking) => "dearer than three quarters of the market",
+            (Self::Premium, Basis::Asking) => "above almost every other asking price",
+        }
+    }
+}
+
+/// What the bands are cut from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Basis {
+    /// Prices people paid. The right answer where there is enough sold history.
+    Sold,
+    /// Prices people are asking, which run well above what they get.
+    Asking,
+}
+
+impl Basis {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Steal => "below almost every other asking price",
-            Self::Low => "cheaper than three quarters of the market",
-            Self::Fair => "in the middle half — the going rate",
-            Self::High => "dearer than three quarters of the market",
-            Self::Premium => "above almost every other asking price",
+            Self::Sold => "what people paid",
+            Self::Asking => "what sellers are asking",
         }
     }
 }
@@ -76,6 +102,7 @@ impl Band {
 /// The price boundaries between bands for one market.
 #[derive(Clone, Debug, Serialize)]
 pub struct Bands {
+    pub basis: Basis,
     pub steal_below: Money,
     pub low_below: Money,
     pub fair_below: Money,
@@ -83,14 +110,33 @@ pub struct Bands {
 }
 
 impl Bands {
-    /// The band boundaries for a market, or `None` when there is no market to draw them
-    /// from. An empty search has percentiles, all of them zero; bands built on those
+    /// Bands cut from what people actually paid.
+    ///
+    /// This is the one to prefer wherever it can be had: asking prices run 16% to 46%
+    /// above sold depending on the model, so bands drawn from them answer a different
+    /// question than the one anyone is asking.
+    pub fn of_sold(sold: &Sold) -> Option<Self> {
+        if !sold.carries_bands() {
+            return None;
+        }
+        Some(Self {
+            basis: Basis::Sold,
+            steal_below: sold.percentile(0.10)?,
+            low_below: sold.percentile(0.25)?,
+            fair_below: sold.percentile(0.75)?,
+            high_below: sold.percentile(0.90)?,
+        })
+    }
+
+    /// The band boundaries for a live market, or `None` when there is no market to draw
+    /// them from. An empty search has percentiles, all of them zero; bands built on those
     /// would put every asking price in `premium` against a market of nothing.
     pub fn of(market: &Market) -> Option<Self> {
         if market.is_empty() {
             return None;
         }
         Some(Self {
+            basis: Basis::Asking,
             steal_below: market.percentile(0.10)?,
             low_below: market.percentile(0.25)?,
             fair_below: market.percentile(0.75)?,
@@ -265,6 +311,42 @@ mod tests {
         }
     }
 
+    fn sold_history() -> Sold {
+        // Nine real sales, so the bands are allowed to be cut from them.
+        let paid = [
+            160_000, 168_000, 175_000, 180_000, 186_800, 195_000, 205_000, 220_000, 240_000,
+        ];
+        let sales: Vec<crate::sold::Transaction> = paid
+            .iter()
+            .map(|minor| crate::sold::Transaction {
+                date: "2026-08-01".into(),
+                condition: "Excellent".into(),
+                asked: Some(Money::from_minor(minor + 20_000)),
+                paid: Money::from_minor(*minor),
+            })
+            .collect();
+        let sorted: Vec<Money> = paid.iter().map(|minor| Money::from_minor(*minor)).collect();
+        Sold {
+            currency: "USD".into(),
+            recorded: 312,
+            percentiles: crate::quantile::REPORT_PERCENTILES
+                .iter()
+                .map(|fraction| {
+                    let rank = (fraction * sorted.len() as f64).ceil() as usize;
+                    (*fraction, sorted[rank.clamp(1, sorted.len()) - 1])
+                })
+                .collect(),
+            sales,
+            covering: Some(("2026-06-03".into(), "2026-08-18".into())),
+            typical_discount: Some(-0.09),
+            at_or_above_ask: 3,
+            discounts_seen: 9,
+            grades: Vec::new(),
+            recent_median: None,
+            recent_sales: 0,
+        }
+    }
+
     fn les_paul_market() -> Market {
         market_with(&[
             (0.05, 160_000),
@@ -275,6 +357,38 @@ mod tests {
             (0.90, 288_000),
             (0.95, 320_000),
         ])
+    }
+
+    #[test]
+    fn bands_prefer_what_people_paid_over_what_sellers_want() {
+        let asking = Bands::of(&les_paul_market()).unwrap();
+        let sold = Bands::of_sold(&sold_history()).unwrap();
+        assert_eq!(Basis::Asking, asking.basis);
+        assert_eq!(Basis::Sold, sold.basis);
+        // The whole reason sold is preferred: every boundary sits lower.
+        assert!(sold.fair_below < asking.fair_below);
+        assert!(sold.steal_below < asking.steal_below);
+    }
+
+    #[test]
+    fn a_record_too_thin_to_cut_into_five_bands_declines_to() {
+        let mut thin = sold_history();
+        thin.sales = Vec::new();
+        thin.percentiles = vec![(0.50, Money::from_minor(410_000))];
+        assert!(!thin.carries_bands());
+        assert!(Bands::of_sold(&thin).is_none());
+    }
+
+    #[test]
+    fn a_verdict_says_which_prices_it_is_talking_about() {
+        assert_eq!(
+            "the middle half of what people paid",
+            Band::Fair.verdict(Basis::Sold)
+        );
+        assert_eq!(
+            "in the middle half — the going rate",
+            Band::Fair.verdict(Basis::Asking)
+        );
     }
 
     #[test]

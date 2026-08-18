@@ -399,6 +399,31 @@ fn fussy_catalogue_routes() -> HashMap<String, Value> {
     routes
 }
 
+/// A sold history for the catalogue model the other fixtures use.
+///
+/// `paid` is in minor units; each sale is recorded as having been asked 20% more, which
+/// is roughly the real gap between what sellers want and what they get.
+fn sold_routes(paid: &[i64]) -> (String, Value) {
+    let transactions: Vec<Value> = paid
+        .iter()
+        .enumerate()
+        .map(|(index, amount)| {
+            json!({
+                "date": format!("2026-0{}-1{}", 1 + index % 8, index % 10),
+                "condition": if index % 3 == 0 { "Excellent" } else { "Good" },
+                "source": "Reverb",
+                "order_id": 1000 + index,
+                "price_ask": {"amount_cents": (*amount as f64 * 1.2).round() as i64, "currency": "USD"},
+                "price_final": {"amount_cents": amount, "currency": "USD"},
+            })
+        })
+        .collect();
+    (
+        "/transactions".to_string(),
+        json!({"total": paid.len(), "total_pages": 1, "transactions": transactions}),
+    )
+}
+
 /// Catalogue routes plus an explicitly empty `/listings`, for the nothing-for-sale case.
 fn empty_market_routes() -> HashMap<String, Value> {
     let mut routes = catalogue_routes(0);
@@ -859,6 +884,102 @@ fn a_reading_can_be_seen_without_being_written_down() {
     ));
     assert!(!report["recorded"].as_bool().unwrap());
     assert!(!history.exists(), "--no-record wrote to the history anyway");
+}
+
+#[test]
+fn bands_are_cut_from_what_people_paid_rather_than_what_sellers_want() {
+    // Listings asking $2,000-$3,000 against sales that went for $1,500-$2,000. Anchoring
+    // to the asking prices would call $2,100 a bargain; it is dearer than every sale.
+    let mut routes = catalogue_routes(60);
+    let (path, sales) = sold_routes(&[
+        150_000, 155_000, 160_000, 165_000, 170_000, 175_000, 180_000, 185_000, 190_000, 200_000,
+    ]);
+    routes.insert(path, sales);
+    let stub = Stub::start(inventory(60, 200_000, 300_000), routes, 0);
+    let report = json_of(&stub.run(&["price", "Les Paul", "--asking", "2100", "--format", "json"]));
+
+    assert_eq!("sold", report["bands"]["basis"]);
+    let sold = &report["sold"];
+    assert_eq!(10, sold["read"]);
+    // The asking median is far above anything anyone paid, and the report says so.
+    assert!(sold["asking_premium"].as_f64().unwrap() > 0.25);
+    assert_eq!(100, sold["asking_percentile"]);
+
+    // $2,100 is above every recorded sale, whatever the other sellers are asking.
+    assert_eq!("premium", report["asking"]["band"]);
+    assert_eq!("sold", report["asking"]["basis"]);
+    assert!(report["asking"]["against_median"].as_f64().unwrap() > 0.0);
+
+    // Each band carries the asking price at the same percentile.
+    let fair = report["bands"]["bands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|band| band["band"] == "fair")
+        .unwrap();
+    assert!(fair["asking_from"].as_f64().unwrap() > fair["from"].as_f64().unwrap());
+}
+
+#[test]
+fn a_model_with_no_sold_record_falls_back_to_asking_and_says_so() {
+    let mut routes = catalogue_routes(60);
+    routes.insert(
+        "/transactions".to_string(),
+        json!({"total": 0, "total_pages": 1, "transactions": []}),
+    );
+    let stub = Stub::start(inventory(60, 200_000, 300_000), routes, 0);
+    let report = json_of(&stub.run(&["price", "Les Paul", "--format", "json"]));
+
+    assert!(report["sold"].is_null());
+    assert_eq!("asking", report["bands"]["basis"]);
+    let warnings = report["diagnostics"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .unwrap_or_default()
+            .contains("no record of this model selling")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn a_sold_history_that_cannot_be_read_costs_the_sold_section_and_nothing_else() {
+    // No /transactions route at all, so the stub 404s it the way a moved endpoint would.
+    let stub = Stub::start(inventory(60, 200_000, 300_000), catalogue_routes(60), 0);
+    let report = json_of(&stub.run(&["price", "Les Paul", "--format", "json"]));
+
+    // The live market is still measured and still reported.
+    assert_eq!(60, report["market"]["listings"]);
+    assert_eq!("asking", report["bands"]["basis"]);
+    let warnings = report["diagnostics"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not read the sold history")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn too_few_sales_are_quoted_but_not_cut_into_bands() {
+    let mut routes = catalogue_routes(60);
+    let (path, sales) = sold_routes(&[150_000, 160_000, 170_000]);
+    routes.insert(path, sales);
+    let stub = Stub::start(inventory(60, 200_000, 300_000), routes, 0);
+    let report = json_of(&stub.run(&["price", "Les Paul", "--format", "json"]));
+
+    // Three sales are worth knowing about and not worth five percentile bands.
+    assert_eq!(3, report["sold"]["read"]);
+    assert_eq!("asking", report["bands"]["basis"]);
+    let warnings = report["diagnostics"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .unwrap_or_default()
+            .contains("too few to cut into bands")),
+        "{warnings:?}"
+    );
 }
 
 #[test]

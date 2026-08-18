@@ -258,6 +258,28 @@ impl Client {
         self.get_json(&format!("{}/autocomplete", api_root()))
     }
 
+    /// One page of a model's sold history, newest first.
+    ///
+    /// This is the endpoint the retired Price Guide's data moved to. It is public, needs
+    /// no credentials, and reports both what each item was listed at and what it actually
+    /// went for.
+    pub fn transactions(&self, model_id: u64, page: u32, per_page: u32) -> Result<SalePage> {
+        let parameters = vec![
+            ("page".to_string(), page.to_string()),
+            (
+                "per_page".to_string(),
+                per_page.clamp(1, MAX_PER_PAGE).to_string(),
+            ),
+        ];
+        self.get_json(&url(
+            &format!(
+                "{}/comparison_shopping_pages/{model_id}/transactions",
+                api_root()
+            ),
+            &parameters,
+        ))
+    }
+
     /// Reverb's shipping region tree: countries, the superregions they sit in, and the
     /// everywhere-else catch-all.
     pub fn shipping_regions(&self) -> Result<ShippingRegions> {
@@ -501,6 +523,33 @@ pub struct Grade {
 pub struct Price {
     #[serde(default)]
     pub amount_cents: i64,
+}
+
+/// A page of sold history.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SalePage {
+    #[serde(default)]
+    pub total: u32,
+    #[serde(default)]
+    pub total_pages: u32,
+    #[serde(default)]
+    pub transactions: Vec<Sale>,
+}
+
+/// One completed sale.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Sale {
+    /// The day it sold, as `YYYY-MM-DD`.
+    #[serde(default)]
+    pub date: String,
+    #[serde(default, deserialize_with = "collapse")]
+    pub condition: String,
+    /// What it was listed at. Absent on some records.
+    #[serde(default)]
+    pub price_ask: Option<Price>,
+    /// What it actually sold for.
+    #[serde(default)]
+    pub price_final: Option<Price>,
 }
 
 /// Every brand and model name Reverb knows.

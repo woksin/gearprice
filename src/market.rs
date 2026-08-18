@@ -119,6 +119,11 @@ fn grade_name(slug: &str, display: String) -> String {
     }
 }
 
+/// The rank of a grade named however Reverb spelled it — slug or display name.
+pub fn grade_rank_of(name: &str) -> usize {
+    grade_rank(&name.to_lowercase().replace(' ', "-"))
+}
+
 fn grade_rank(slug: &str) -> usize {
     GRADE_ORDER
         .iter()

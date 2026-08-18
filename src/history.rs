@@ -32,12 +32,21 @@ pub struct Snapshot {
     pub percentiles: Vec<(f64, f64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub median_days_listed: Option<i64>,
+    /// The median of what the model actually sold for, where Reverb had a record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub median_sold: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sales_read: Option<usize>,
 }
 
 impl Snapshot {
-    pub fn of(subject: Subject, market: &Market) -> Self {
+    pub fn of(subject: Subject, market: &Market, sold: Option<&crate::sold::Sold>) -> Self {
         let currency = market.currency.as_str();
         Self {
+            median_sold: sold
+                .and_then(crate::sold::Sold::median)
+                .map(|price| price.major(currency)),
+            sales_read: sold.map(|sold| sold.sales.len()),
             recorded_at: Utc::now(),
             subject,
             listings: market.total,
@@ -205,6 +214,8 @@ pub struct Movement {
     pub readings: usize,
     pub median_then: Option<f64>,
     pub median_now: Option<f64>,
+    pub sold_then: Option<f64>,
+    pub sold_now: Option<f64>,
     pub listings_then: u32,
     pub listings_now: u32,
 }
@@ -218,6 +229,8 @@ impl Movement {
             readings: readings.len(),
             median_then: first.median(),
             median_now: last.median(),
+            sold_then: first.median_sold,
+            sold_now: last.median_sold,
             listings_then: first.listings,
             listings_now: last.listings,
         })
@@ -278,6 +291,8 @@ mod tests {
                 (0.75, median + 100.0),
             ],
             median_days_listed: Some(40),
+            median_sold: Some(median * 0.85),
+            sales_read: Some(20),
         }
     }
 
@@ -396,6 +411,9 @@ mod tests {
         let movement = Movement::between(&readings).unwrap();
         assert_eq!(3, movement.readings);
         assert_eq!(Some(-77.0), movement.median_change());
+        // What it was trading at is recorded beside what it was listed at.
+        assert_eq!(Some(2_300.0 * 0.85), movement.sold_then);
+        assert_eq!(Some(2_223.0 * 0.85), movement.sold_now);
         let share = movement.median_change_share().unwrap();
         assert!((share + 0.0334782).abs() < 1e-6, "{share}");
         assert_eq!(198, movement.listings_then);

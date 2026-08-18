@@ -8,7 +8,7 @@ use std::io::{self, IsTerminal, Write};
 
 use anyhow::Result;
 
-use crate::classify::{Band, Segment};
+use crate::classify::{Band, Basis, Segment};
 use crate::money::{self, Money};
 use crate::report::{
     BandTable, ClassReport, ListingReport, ListingSummary, ModelReport, PriceReport, SOURCE_SHORT,
@@ -115,14 +115,78 @@ pub fn print_price(report: &PriceReport, style: Style) {
         println!("  {:<21} {}", "Model", parts.join(" · "));
         println!("  {:<21} {}", "", style.dim(&model.url));
     }
-    println!(
-        "  {:<21} {} {} listings · {} · {}",
-        "Market",
-        number(report.market.listings),
-        report.condition,
-        currency,
-        style.dim(SOURCE_SHORT)
-    );
+    if let Some(sold) = &report.sold {
+        let covering = sold
+            .covering
+            .as_ref()
+            .map(|span| format!(" · {span}"))
+            .unwrap_or_default();
+        println!(
+            "  {:<21} {:>10}  {}",
+            style.bold("Sold"),
+            sold.median
+                .map(|median| price(median, currency))
+                .unwrap_or_else(|| "—".into()),
+            style.dim(&format!(
+                "median of {} {}{covering}",
+                number(sold.read as u32),
+                if sold.read == 1 { "sale" } else { "sales" }
+            ))
+        );
+        // Quoted only when the whole record reaches back far enough to be describing a
+        // different market than the one somebody is buying in today.
+        if let Some(recent) = sold.recent_median {
+            println!(
+                "  {:<21} {:>10}  {}",
+                "Sold, last year",
+                price(recent, currency),
+                style.dim(&format!(
+                    "median of the {} most recent — read this one, not the figure above",
+                    number(sold.recent_sales as u32)
+                ))
+            );
+        }
+        println!(
+            "  {:<21} {:>10}  {}",
+            "Asking",
+            report
+                .market
+                .percentiles
+                .iter()
+                .find(|point| point.percentile == 50)
+                .map(|point| price(point.price, currency))
+                .unwrap_or_else(|| "—".into()),
+            style.dim(&match (sold.asking_premium, sold.asking_percentile) {
+                (Some(premium), Some(percentile)) => format!(
+                    "{:+.0}% above sold — the {} percentile of what anyone paid",
+                    premium * 100.0,
+                    ordinal(percentile)
+                ),
+                _ => format!("{} listings on the market", number(report.market.listings)),
+            })
+        );
+        if let Some(discount) = sold.typical_discount {
+            println!(
+                "  {:<21} {:>10}  {}",
+                "Room",
+                format!("{:.0}%", discount * 100.0),
+                style.dim(&format!(
+                    "typical, but {} of {} went at or above the ask",
+                    number(sold.sold_at_or_above_ask as u32),
+                    number(sold.sales_with_both_prices as u32)
+                ))
+            );
+        }
+    } else {
+        println!(
+            "  {:<21} {} {} listings · {} · {}",
+            "Market",
+            number(report.market.listings),
+            report.condition,
+            currency,
+            style.dim(SOURCE_SHORT)
+        );
+    }
     if let Some(destination) = &report.delivered_to {
         println!(
             "  {:<21} {} {}",
@@ -197,8 +261,12 @@ pub fn print_price(report: &PriceReport, style: Style) {
             "  {:<21} {}",
             "",
             style.dim(&format!(
-                "{} {direction} the median asking price",
-                money_of(gap.abs())
+                "{} {direction} the median {}",
+                money_of(gap.abs()),
+                match asking.basis {
+                    Basis::Sold => "price people paid",
+                    Basis::Asking => "asking price",
+                }
             ))
         );
     }
@@ -212,13 +280,21 @@ pub fn print_price(report: &PriceReport, style: Style) {
         print_distribution(report, currency, style);
     }
 
-    if !report.market.grades.is_empty() {
+    let (grades, grade_heading) = match report.sold.as_ref().filter(|sold| !sold.grades.is_empty())
+    {
+        Some(sold) => (
+            &sold.grades,
+            "What condition is worth  (median price paid, best grade first)",
+        ),
+        None => (
+            &report.market.grades,
+            "Asking price by condition  (median, best grade first)",
+        ),
+    };
+    if !grades.is_empty() {
         println!();
-        println!(
-            "{}",
-            style.bold("Asking price by condition  (median, best grade first)")
-        );
-        for grade in &report.market.grades {
+        println!("{}", style.bold(grade_heading));
+        for grade in grades {
             let against = match grade.against_median {
                 Some(difference) if difference.abs() >= 1.0 => {
                     let sign = if difference < 0.0 { "−" } else { "+" };
@@ -230,9 +306,14 @@ pub fn print_price(report: &PriceReport, style: Style) {
                 _ => String::new(),
             };
             println!(
-                "  {:<21} {:>5} listings {:>12}  {against}",
+                "  {:<21} {:>5} {:<9}{:>12}  {against}",
                 grade.grade,
                 number(grade.listings),
+                if report.sold.is_some() {
+                    "sales"
+                } else {
+                    "listings"
+                },
                 price(grade.median, currency),
             );
         }
@@ -269,15 +350,25 @@ pub fn print_price(report: &PriceReport, style: Style) {
 
 fn print_bands(bands: &BandTable, currency: &str, style: Style) {
     let timed = bands.bands.iter().any(|row| row.days_listed.is_some());
+    let paired = bands
+        .bands
+        .iter()
+        .any(|row| row.asking_from.is_some() || row.asking_to.is_some());
     println!(
         "{}",
-        style.bold(if timed {
-            "Price bands  (what sellers are asking, and whether anyone is paying it)"
-        } else {
-            "Price bands  (what sellers are asking for this model right now)"
+        style.bold(match bands.basis {
+            Basis::Sold => "What people actually paid",
+            Basis::Asking if timed =>
+                "Price bands  (what sellers are asking, and whether anyone is paying it)",
+            Basis::Asking => "Price bands  (what sellers are asking for this model right now)",
         })
     );
-    if timed {
+    if paired {
+        println!(
+            "  {:<9} {:>25} {:>7} {:>25}  ",
+            "Band", "Sold range", "Share", "Asking equivalent"
+        );
+    } else if timed {
         println!(
             "  {:<9} {:>25} {:>7} {:>13}  Meaning",
             "Band", "Range", "Share", "Listed for"
@@ -286,14 +377,28 @@ fn print_bands(bands: &BandTable, currency: &str, style: Style) {
         println!("  {:<9} {:>25} {:>7}  Meaning", "Band", "Range", "Share");
     }
     println!("  {}", style.dim(&"─".repeat(RULE_WIDTH - 2)));
-    let coarse = coarse_column(bands.bands.iter().flat_map(|row| [row.from, row.to]));
+    let coarse = coarse_column(
+        bands
+            .bands
+            .iter()
+            .flat_map(|row| [row.from, row.to, row.asking_from, row.asking_to]),
+    );
     for row in &bands.bands {
         let range = price_range(row.from, row.to, currency, coarse);
         let band = Band::ALL
             .into_iter()
             .find(|band| band.name() == row.band)
             .unwrap_or(Band::Fair);
-        if timed {
+        if paired {
+            println!(
+                "  {:<9} {:>25} {:>7} {:>25}  {}",
+                style.band(band, &row.band),
+                range,
+                format!("{:.0}%", row.share * 100.0),
+                price_range(row.asking_from, row.asking_to, currency, coarse),
+                style.dim(&row.verdict)
+            );
+        } else if timed {
             println!(
                 "  {:<9} {:>25} {:>7} {:>13}  {}",
                 style.band(band, &row.band),
@@ -312,7 +417,19 @@ fn print_bands(bands: &BandTable, currency: &str, style: Style) {
             );
         }
     }
-    if timed {
+    if paired {
+        println!(
+            "  {}",
+            style.dim(
+                "Bands are cut from what people paid. The asking column is the listing price \
+                 at the"
+            )
+        );
+        println!(
+            "  {}",
+            style.dim("same percentile — what a seller wants for gear that trades in that band.")
+        );
+    } else if timed {
         println!(
             "  {}",
             style.dim(
@@ -780,6 +897,35 @@ pub fn print_price_csv(report: &PriceReport) -> Result<()> {
         ])?;
         Ok(())
     };
+    if let Some(sold) = &report.sold {
+        row("basis", "sold".to_string())?;
+        if let Some(median) = sold.median {
+            row("sold_median", format!("{median:.2}"))?;
+        }
+        for point in &sold.percentiles {
+            row(
+                &format!("sold_p{:02}", point.percentile),
+                format!("{:.2}", point.price),
+            )?;
+        }
+        row("sold_sales_read", sold.read.to_string())?;
+        row("sold_sales_recorded", sold.recorded.to_string())?;
+        if let Some(covering) = &sold.covering {
+            row("sold_covering", covering.clone())?;
+        }
+        if let Some(premium) = sold.asking_premium {
+            row("asking_premium_over_sold", format!("{premium:.4}"))?;
+        }
+        if let Some(discount) = sold.typical_discount {
+            row("typical_discount", format!("{discount:.4}"))?;
+        }
+        row(
+            "sold_at_or_above_ask",
+            sold.sold_at_or_above_ask.to_string(),
+        )?;
+    } else {
+        row("basis", "asking".to_string())?;
+    }
     row("cheapest", format!("{:.2}", report.market.cheapest))?;
     row("dearest", format!("{:.2}", report.market.dearest))?;
     if let Some(mean) = report.market.mean {
@@ -796,6 +942,7 @@ pub fn print_price_csv(report: &PriceReport) -> Result<()> {
         row("class_percentile", class.percentile.to_string())?;
     }
     if let Some(bands) = &report.bands {
+        row("band_basis", bands.basis.label().to_string())?;
         for band in &bands.bands {
             row(
                 &format!("band_{}_from", band.band),

@@ -77,33 +77,45 @@ No account, no API key, no configuration. It reads Reverb's public marketplace.
 
 ---
 
-## Asking prices — for now
+## What it sold for, not just what it costs
 
-Every number gearprice currently reports comes from listings that are for sale **right
-now**. They are what sellers are asking, not what anything sold for.
+Every band gearprice draws comes from **what people actually paid**, where Reverb has a
+record of it. Asking prices are shown beside them as the negotiating position, because
+that is what they are:
 
-**This is a known limitation, not a design choice, and it is being fixed.** An earlier
-version of this README claimed sold prices were unobtainable because Reverb retired its
-public Price Guide. The Price Guide is indeed dead — `/api/priceguide` answers `403` to
-everyone — but sold data moved rather than vanished, to
-`/api/comparison_shopping_pages/{id}/transactions`, which is public and returns both what
-each item was listed at and what it actually sold for.
+```
+  Sold                      $1,819  median of 100 sales · 2026-06-03 to 2026-08-18
+  Asking                    $2,238  +23% above sold — the 91st percentile of what anyone paid
+  Room                         -6%  typical, but 26 of 100 went at or above the ask
+```
 
-That matters, because asking prices run well above what people pay:
+The gap is not small, and it is not the same for every model:
 
 | Model | Asking median | Sold median | Gap |
 |---|---|---|---|
-| Gibson Les Paul Standard '60s | $2,223 | $1,868 | −16% |
-| Fender American Professional II Stratocaster | $1,573 | $1,250 | −21% |
-| Marshall JMP Major (guitar) | $5,384 | $2,900 | −46% |
+| Gibson Les Paul Standard '60s | $2,238 | $1,819 | +23% |
+| Fender American Professional II Stratocaster | $1,573 | $1,250 | +26% |
+| Marshall JMP Major (guitar) | $5,384 | $2,900 | +86% |
 
-So read every band below as *"how does this compare to what everyone else is asking"*,
-and knock something off for what it is likely to trade at. [docs/PLAN.md](docs/PLAN.md)
-sets out the rebuild that makes sold prices the primary number.
+Reverb's public Price Guide is retired — `/api/priceguide` answers `403` to everyone — but
+the sold history moved rather than vanished, and gearprice reads it from
+`/api/comparison_shopping_pages/{id}/transactions`. That endpoint reports both what each
+item was listed at and what it went for, which is where the negotiating-room figure comes
+from too.
 
-Until then the most useful thing here is the clearing signal: what is priced where the
-market clears leaves, and what is priced above it sits. gearprice reports how long the
-listings in each band have been waiting, which says which asking prices are being ignored.
+**Where a model has no sold record**, the bands fall back to asking prices and the report
+says so on its face. Same when there are only a handful of sales: three sales are worth
+knowing about and not worth five percentile bands.
+
+**Where the record runs back years**, the recent median is quoted beside the overall one.
+The Marshall Major has sold thirty-nine times since 2014 at a median of $2,900 — and
+$4,100 in the last year. Quoting the twelve-year figure alone to somebody buying this
+week would be useless:
+
+```
+  Sold                      $2,900  median of 39 sales · 2014-08-27 to 2026-01-14
+  Sold, last year           $4,100  median of the 4 most recent — read this one
+```
 
 ---
 
@@ -370,8 +382,10 @@ themselves. Both paths report the same percentiles, and the report says which on
 
 Stated plainly, because a price is only as good as what you know about it.
 
-- **Asking, not sold.** Covered [above](#asking-prices--for-now). Sold prices are
-  obtainable and are being built in; until then every band here reads high.
+- **Sold prices are what people paid, not what a thing is worth.** They are a record of
+  completed Reverb sales, so private and shop sales elsewhere are invisible, and a model
+  that rarely trades has a thin record. Where there is no record at all, the bands are
+  asking prices and read high — the report says which it is using.
 - **A model is not a condition.** A `used` band spans mint to fair. A mint example at the
   top of the `fair` band may be the better buy than a beaten one at the bottom. Narrow it
   with `--condition excellent` when the market is big enough to support it.
@@ -407,6 +421,8 @@ Available on `price` and `listings`.
 | Option | |
 |---|---|
 | `--condition` | `all`, `used`, `new`, `b-stock`, `mint`, `mint-inventory`, `excellent`, `very-good`, `good`, `fair`, `poor`, `non-functioning`. Default `used` |
+| `--sold-sample N` | How many recent sales to read. Default 100 |
+| `--no-sold` | Skip the sold history, saving a request or two |
 | `--model-id ID` | Price one exact catalogue model, from `gearprice models`. `price` and `listings` only |
 | `--raw` | Search the words given instead of resolving them to a model. `price` and `listings` only |
 | `--category SLUG` | A slug from `gearprice categories`, or `root/leaf` |
@@ -448,6 +464,9 @@ shape passed through.
 ```bash
 gearprice price "Gibson Les Paul Standard 60s" --format json | jq '.class.segment'
 # "pro"
+
+gearprice price "Boss DS-1" --format json | jq '.sold.median, .sold.asking_premium'
+# what people paid, and how far above it the asking prices run
 
 gearprice price "gibsen les pual standrd" --format json | jq '.interpreted_as, .model.title'
 # "gibson les paul standard"

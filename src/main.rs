@@ -14,6 +14,7 @@ mod report;
 mod resolve;
 mod reverb;
 mod shipping;
+mod sold;
 mod taxonomy;
 mod update;
 
@@ -33,7 +34,7 @@ use query::{Condition, Search, Sort};
 use report::{
     AlternativeModel, AskingVerdict, BandTable, ClassReport, ClassRow, ClassSummary, Diagnostics,
     ListingReport, ListingSummary, MarketSummary, ModelReport, ModelRow, ModelSummary, PriceReport,
-    Reading, SOURCE, TrackReport, TrackedReport, TrackedSubject,
+    Reading, SOURCE, SoldSummary, TrackReport, TrackedReport, TrackedSubject,
 };
 use reverb::{CatalogueModel, Client, DEFAULT_REQUEST_BUDGET, MAX_PER_PAGE};
 use shipping::Regions;
@@ -169,6 +170,14 @@ struct PriceArguments {
     /// Skip the price class, which costs two extra requests.
     #[arg(long)]
     no_class: bool,
+
+    /// Skip the sold history, which costs one or two extra requests.
+    #[arg(long)]
+    no_sold: bool,
+
+    /// How many recent sales to read.
+    #[arg(long, default_value_t = sold::TARGET_SAMPLE, value_name = "N")]
+    sold_sample: u32,
 
     /// How many listings to show.
     #[arg(long, default_value_t = 5, value_name = "N")]
@@ -397,7 +406,56 @@ fn run_price(
             arguments.filters.condition
         ));
     }
-    let bands = Bands::of(&market);
+
+    // What people paid, where Reverb has a record of it. Only a catalogue model has a
+    // sold history — a free-text search is not a thing that can have been sold.
+    let sold = match model.as_ref().filter(|_| !arguments.no_sold) {
+        Some(model) => {
+            progress.set("Reading what it has sold for");
+            // Sold history is an enhancement, not a dependency. A model Reverb has no
+            // transaction record for, or an endpoint that has moved again, must cost the
+            // sold section and nothing else — the live market is still worth reporting.
+            let history = match sold::read(client, model.id, arguments.sold_sample) {
+                Ok(history) => history,
+                Err(error) => {
+                    warnings.push(format!(
+                        "could not read the sold history ({error}) — the prices below are \
+                         what sellers are asking"
+                    ));
+                    sold::Sold::none(client.currency())
+                }
+            };
+            if history.is_empty() {
+                warnings.push(
+                    "Reverb has no record of this model selling, so every price here is \
+                     what someone is asking rather than what anyone paid"
+                        .into(),
+                );
+                None
+            } else {
+                if !history.carries_bands() {
+                    warnings.push(format!(
+                        "only {} recorded {} — quoted below, but too few to cut into bands, \
+                         so those come from asking prices",
+                        history.sales.len(),
+                        if history.sales.len() == 1 {
+                            "sale"
+                        } else {
+                            "sales"
+                        }
+                    ));
+                }
+                Some(history)
+            }
+        }
+        None => None,
+    };
+
+    // Sold where there is enough of it, asking otherwise — and the report says which.
+    let bands = sold
+        .as_ref()
+        .and_then(Bands::of_sold)
+        .or_else(|| Bands::of(&market));
 
     let class = if arguments.no_class || market.is_empty() {
         None
@@ -417,12 +475,19 @@ fn run_price(
         let bands = bands.as_ref()?;
         let amount = Money::from_major(price, &market.currency);
         let band = bands.band_for(amount);
-        let median = market.median()?;
+        // Compared against what people paid when that is known. Judging an asking price
+        // against other asking prices only says whether the seller is in line with other
+        // sellers, which is not the question anyone is asking.
+        let against = match bands.basis {
+            classify::Basis::Sold => sold.as_ref().and_then(sold::Sold::median)?,
+            classify::Basis::Asking => market.median()?,
+        };
         Some(AskingVerdict {
             price,
             band,
-            verdict: band.verdict().to_string(),
-            against_median: amount.major(&market.currency) - median.major(&market.currency),
+            basis: bands.basis,
+            verdict: band.verdict(bands.basis).to_string(),
+            against_median: amount.major(&market.currency) - against.major(&market.currency),
         })
     });
 
@@ -472,6 +537,7 @@ fn run_price(
             .map(AlternativeModel::of)
             .collect(),
         market: MarketSummary::of(&market),
+        sold: sold.as_ref().map(|sold| SoldSummary::of(sold, &market)),
         bands: bands.as_ref().map(|bands| BandTable::of(bands, &market)),
         class: class.as_ref().map(ClassSummary::of),
         asking,
@@ -856,7 +922,13 @@ fn run_track(
         condition: arguments.filters.condition,
         ships_to: search.ships_to.clone(),
     };
-    let snapshot = Snapshot::of(subject.clone(), &market);
+    // Recorded alongside the asking median, so a history built now can answer "what was
+    // this trading at in March" and not only "what were people hoping for".
+    let sold = model
+        .as_ref()
+        .and_then(|model| sold::read(client, model.id, sold::TARGET_SAMPLE).ok())
+        .filter(|history| !history.is_empty());
+    let snapshot = Snapshot::of(subject.clone(), &market, sold.as_ref());
     if !arguments.no_record {
         history.record(&snapshot)?;
     }

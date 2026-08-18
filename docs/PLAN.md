@@ -183,9 +183,11 @@ non-interactive stdout keep the current behaviour so scripts and pipes are unaff
 
 ## Order of work
 
-1. **Correct the false claim** in `README.md`, `SECURITY.md` and `report::SOURCE`. Small,
-   and it is currently public and wrong. *(Done in the same commit as this plan.)*
-2. Sold prices: `src/sold.rs`, the transactions client, and the rebuilt `price` report.
+1. ~~**Correct the false claim** in `README.md`, `SECURITY.md` and `report::SOURCE`.~~ Done.
+2. ~~Sold prices: `src/sold.rs`, the transactions client, and the rebuilt `price` report.~~
+   Done. One thing the plan did not anticipate: a long record needs its recent median
+   quoted beside the overall one, or a twelve-year median gets read as today's price.
+   `track` records sold medians too. `classes` remains on asking prices as planned.
 3. Mistake-proofing — small, independent, and each item is already specified above.
 4. Recall widening.
 5. `variants`.
