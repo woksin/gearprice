@@ -117,7 +117,6 @@ pub fn print_price(
     full: bool,
 ) -> io::Result<()> {
     let currency = report.currency.as_str();
-    let money_of = |value: f64| money::format(Money::from_major(value, currency), currency);
 
     let heading = report
         .model
@@ -146,9 +145,7 @@ pub fn print_price(
             out,
             "  {:<21} {:>10}  {}",
             style.bold("Sold"),
-            sold.median
-                .map(|median| price(median, currency))
-                .unwrap_or_else(|| "—".into()),
+            price_or_dash(sold.median, currency),
             style.dim(&format!(
                 "median of {} {}{covering}",
                 number(sold.read as u32),
@@ -179,7 +176,7 @@ pub fn print_price(
                 .iter()
                 .find(|point| point.percentile == 50)
                 .map(|point| price(point.price, currency))
-                .unwrap_or_else(|| "—".into()),
+                .unwrap_or_else(|| "—".to_string()),
             style.dim(&match (sold.asking_premium, sold.asking_percentile) {
                 (Some(premium), Some(percentile)) => format!(
                     "{:+.0}% above sold · {} percentile of what was paid",
@@ -289,7 +286,7 @@ pub fn print_price(
         writeln!(
             out,
             "  {:<21} {}  {}",
-            format!("Asking {}", money_of(asking.price)),
+            format!("Asking {}", price(asking.price, currency)),
             style.band(asking.band, &asking.band.name().to_uppercase()),
             asking.verdict
         )?;
@@ -301,7 +298,7 @@ pub fn print_price(
             "",
             style.dim(&format!(
                 "{} {direction} the median {}",
-                money_of(gap.abs()),
+                price(gap.abs(), currency),
                 match asking.basis {
                     Basis::Sold => "price people paid",
                     Basis::Asking => "asking price",
@@ -615,15 +612,9 @@ pub fn print_models(out: &mut impl Write, report: &ModelReport, style: Style) ->
             "  {:<48} {:>6} {:>11} {:>6} {:>11}",
             truncate(&model.title, 48),
             number(model.used_listings),
-            model
-                .used_from
-                .map(|value| price(value, currency))
-                .unwrap_or_else(|| "—".into()),
+            price_or_dash(model.used_from, currency),
             number(model.new_listings),
-            model
-                .new_from
-                .map(|value| price(value, currency))
-                .unwrap_or_else(|| "—".into()),
+            price_or_dash(model.new_from, currency),
         )?;
     }
     writeln!(out)?;
@@ -884,20 +875,13 @@ pub fn print_variants(
     writeln!(out, "  {}", style.dim(&"─".repeat(rule_width() - 2)))?;
     for variant in &report.variants {
         // The recent median where the record is long, since that is the one to act on.
-        let sold = variant
-            .sold_recent_median
-            .or(variant.sold_median)
-            .map(|value| price(value, currency))
-            .unwrap_or_else(|| "—".into());
+        let sold = price_or_dash(variant.sold_recent_median.or(variant.sold_median), currency);
         writeln!(
             out,
             "  {:<44} {:>6} {:>11} {:>11} {:>7}",
             truncate(&variant.title, 44),
             number(variant.used_listings),
-            variant
-                .used_from
-                .map(|value| price(value, currency))
-                .unwrap_or_else(|| "—".into()),
+            price_or_dash(variant.used_from, currency),
             sold,
             number(variant.sales),
         )?;
@@ -1142,10 +1126,7 @@ pub fn print_track(out: &mut impl Write, report: &TrackReport, style: Style) -> 
             out,
             "  {:<12} {:>12} {:>10} {:>14}{}",
             local_date(&reading.recorded_at),
-            reading
-                .median
-                .map(|median| price(median, currency))
-                .unwrap_or_else(|| "—".into()),
+            price_or_dash(reading.median, currency),
             number(reading.listings),
             reading
                 .median_days_listed
@@ -1159,6 +1140,28 @@ pub fn print_track(out: &mut impl Write, report: &TrackReport, style: Style) -> 
         )?;
     }
     print_usage(out, &report.diagnostics, style)
+}
+
+/// The category tree, as roots with their leaves indented under them.
+///
+/// The root is the heading and the leaves are what a `--category` flag actually takes,
+/// so the root is bolded and the slug column is what the eye runs down.
+pub fn print_categories(
+    out: &mut impl Write,
+    roots: &[crate::reverb::Category],
+    style: Style,
+) -> io::Result<()> {
+    for root in roots {
+        writeln!(
+            out,
+            "{}",
+            style.bold(&format!("{:<32} {}", root.slug, root.name))
+        )?;
+        for leaf in &root.subcategories {
+            writeln!(out, "    {:<28} {}", leaf.slug, style.dim(&leaf.name))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn print_tracked(out: &mut impl Write, report: &TrackedReport, style: Style) -> io::Result<()> {
@@ -1404,6 +1407,14 @@ pub fn print_classes_csv(out: &mut impl Write, report: &ClassReport) -> io::Resu
 
 fn price(value: f64, currency: &str) -> String {
     money::format(Money::from_major(value, currency), currency)
+}
+
+/// A price where there is one, and an em dash where there is not.
+///
+/// The em dash is the report's one way of saying "no figure", so it is spelled in a
+/// single place rather than at each of the sites that needs it.
+fn price_or_dash(value: Option<f64>, currency: &str) -> String {
+    value.map_or_else(|| "—".to_string(), |value| price(value, currency))
 }
 
 /// The precision a whole column of ranges should share: whole units once anything in it

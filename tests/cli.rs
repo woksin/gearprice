@@ -1183,6 +1183,104 @@ fn the_cache_directory_can_be_inspected_and_emptied() {
     assert!(String::from_utf8_lossy(&cleared.stdout).contains("Cleared 0"));
 }
 
+/// A mixed inventory: a third brand new, the rest used.
+fn mixed_condition_stock() -> Vec<Item> {
+    (0..30)
+        .map(|index| Item {
+            price_cents: 100_000 + index * 5_000,
+            grade: if index % 3 == 0 { "brand-new" } else { "good" },
+            title: "Gibson Les Paul Standard",
+            published_at: String::new(),
+            offers: false,
+            shipping: Vec::new(),
+        })
+        .collect()
+}
+
+/// Writes a config file and returns it, so a test can set a default the way a user would.
+fn config_file(directory: &std::path::Path, body: &str) -> std::path::PathBuf {
+    let path = directory.join("config.toml");
+    std::fs::write(&path, body).expect("write the config file");
+    path
+}
+
+#[test]
+fn a_condition_set_in_the_configuration_file_is_what_listings_says_it_searched() {
+    // The bug this pins: `listings` filtered on the settled condition but labelled the
+    // report from the raw flags, so a file saying `new` searched new stock and printed
+    // "used" over it — the one line telling you what you are looking at, wrong.
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_file(directory.path(), "condition = \"new\"\n");
+    let stub = Stub::start(mixed_condition_stock(), catalogue_routes(30), 0);
+
+    let output = Command::new(binary())
+        .args(["listings", "Les Paul", "--format", "json", "--no-cache"])
+        .env("GEARPRICE_API_ROOT", &stub.address)
+        .env("GEARPRICE_NO_PROGRESS", "1")
+        .env("NO_COLOR", "1")
+        .env("GEARPRICE_CONFIG", &config)
+        .output()
+        .expect("run gearprice");
+    let report = json_of(&output);
+
+    assert_eq!(
+        "new", report["condition"],
+        "the report has to name the condition it actually searched"
+    );
+    // And it has to be the condition that was searched, not just the word: every listing
+    // returned is new stock, so a "used" label would have been describing the wrong set.
+    let listings = report["listings"].as_array().unwrap();
+    assert!(
+        !listings.is_empty(),
+        "the stub should have matched new stock"
+    );
+}
+
+#[test]
+fn deal_judges_against_the_condition_asked_for_rather_than_always_used() {
+    // `deal` flattens the shared filters, so clap advertises --condition on it. It used to
+    // be overwritten with Used regardless, which silently answered a question nobody asked.
+    let mut routes = catalogue_routes(30);
+    routes.insert(
+        "/listings/12345".to_string(),
+        json!({
+            "id": 12_345,
+            "title": "Gibson Les Paul Standard",
+            "condition": {"slug": "brand-new", "display_name": "Brand New"},
+            "price": {"amount_cents": 150_000, "currency": "USD"},
+            "_links": {
+                "web": {"href": "https://reverb.com/item/12345"},
+                "comparison_shopping": {
+                    "href": "https://api.reverb.com/api/comparison_shopping_pages/104713"
+                }
+            }
+        }),
+    );
+    let stub = Stub::start(mixed_condition_stock(), routes, 0);
+    let report = json_of(&stub.run(&[
+        "deal",
+        "https://reverb.com/item/12345",
+        "--condition",
+        "new",
+        "--format",
+        "json",
+    ]));
+
+    // `deal` reports no condition line, so the market it measured is the evidence: asking
+    // for new stock has to produce a market of new stock and nothing else.
+    let grades = report["market"]["grades"].as_array().unwrap();
+    assert!(
+        !grades.is_empty(),
+        "the deal should have measured a market: {report}"
+    );
+    assert!(
+        grades
+            .iter()
+            .all(|grade| grade["grade"] == "brand-new" || grade["grade"] == "Brand New"),
+        "--condition on deal has to reach the market it is judged against, got {grades:?}"
+    );
+}
+
 #[test]
 fn arguments_that_cannot_both_be_meant_are_refused() {
     for arguments in [

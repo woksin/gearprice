@@ -25,7 +25,6 @@ mod taxonomy;
 mod update;
 mod years;
 
-use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -222,7 +221,7 @@ impl Filters {
             condition: Some(
                 self.condition
                     .or(settled.condition)
-                    .unwrap_or_default_used(),
+                    .unwrap_or(Condition::Used),
             ),
             category: self.category.clone(),
             make: self.make.clone(),
@@ -236,16 +235,6 @@ impl Filters {
     /// The condition to price, which is used gear unless something said otherwise.
     fn condition(&self) -> Condition {
         self.condition.unwrap_or(Condition::Used)
-    }
-}
-
-trait OrUsed {
-    fn unwrap_or_default_used(self) -> Condition;
-}
-
-impl OrUsed for Option<Condition> {
-    fn unwrap_or_default_used(self) -> Condition {
-        self.unwrap_or(Condition::Used)
     }
 }
 
@@ -1312,11 +1301,8 @@ fn run_listings(
         None => Search::text(words.clone()),
     };
     search.sort = arguments.sort;
-    apply_filters(
-        &mut search,
-        &arguments.filters.settled(&cli.settled),
-        client,
-    )?;
+    let settled_filters = arguments.filters.settled(&cli.settled);
+    apply_filters(&mut search, &settled_filters, client)?;
     taxonomy::require_targeted(&search)?;
 
     // Bands need the distribution, so measuring comes first whenever a label is wanted.
@@ -1365,7 +1351,7 @@ fn run_listings(
         source: SOURCE,
         generated_at: timestamp(),
         currency: market.currency.clone(),
-        condition: arguments.filters.condition().label().to_string(),
+        condition: settled_filters.condition().label().to_string(),
         matched: market.total,
         shown: listings.len(),
         delivered_to: search.ships_to.clone(),
@@ -1508,10 +1494,9 @@ fn run_deal(
     )?;
 
     let mut search = Search::products(model.product_ids());
-    let mut filters = arguments.filters.settled(&cli.settled);
-    // Judged against its own condition where the record is thick enough to support it,
-    // because a mint example and a beaten one are not the same market.
-    filters.condition = Some(Condition::Used);
+    // Judged against its own condition, because a mint example and a beaten one are not
+    // the same market. Used unless the caller or the configuration file says otherwise.
+    let filters = arguments.filters.settled(&cli.settled);
     apply_filters(&mut search, &filters, client)?;
     progress.set("Measuring the market");
     let market = measure(client, &search)?;
@@ -1721,21 +1706,9 @@ fn run_categories(cli: &Cli, client: &Client, progress: &Progress, style: Style)
                 })).collect::<Vec<_>>()
             }),
         ),
-        _ => {
-            for root in taxonomy.roots() {
-                writeln!(out, "{}", style_root(&root.slug, &root.name, style))?;
-                for leaf in &root.subcategories {
-                    writeln!(out, "    {:<28} {}", leaf.slug, leaf.name)?;
-                }
-            }
-            Ok(())
-        }
+        _ => output::print_categories(out, taxonomy.roots(), style),
     })?;
     Ok(())
-}
-
-fn style_root(slug: &str, name: &str, _style: Style) -> String {
-    format!("{slug:<32} {name}")
 }
 
 // ---------------------------------------------------------------------------

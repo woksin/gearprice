@@ -13,7 +13,7 @@
 //!   past the paging cap: see [`crate::quantile`].
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -182,7 +182,7 @@ impl Client {
         let mut last_error = None;
         for attempt in 0..RETRY_ATTEMPTS {
             if attempt > 0 {
-                thread::sleep(backoff(
+                thread::sleep(scattered(backoff(
                     attempt,
                     last_error.as_ref().and_then(|error| {
                         if let RequestFailure::Retryable { retry_after, .. } = error {
@@ -191,7 +191,7 @@ impl Client {
                             None
                         }
                     }),
-                ));
+                )));
             }
             let used = self.requests.fetch_add(1, Ordering::Relaxed);
             if let Some(watcher) = self
@@ -222,7 +222,13 @@ impl Client {
             }
             match outcome {
                 Ok(body) => {
-                    if let Some(cache) = &self.cache {
+                    // Only a body that parses is worth keeping. A 200 carrying a
+                    // truncated payload or an HTML error page would otherwise be served
+                    // from disk until the TTL expired, so every retry would fail the same
+                    // way and --no-cache would be the only way out.
+                    if let Some(cache) = &self.cache
+                        && serde_json::from_str::<serde::de::IgnoredAny>(&body).is_ok()
+                    {
                         // A cache that cannot be written is not a reason to fail a run
                         // that already has its answer.
                         let _ = cache.put(&cache_key, &body);
@@ -412,6 +418,30 @@ fn backoff(attempt: u32, retry_after: Option<Duration>) -> Duration {
     RETRY_BASE_DELAY
         .saturating_mul(1 << attempt.min(5))
         .min(RETRY_MAX_DELAY)
+}
+
+/// How far apart to spread threads that were rate limited together.
+const JITTER_SPREAD: Duration = Duration::from_millis(400);
+
+/// Scatters a retry so a rate limit does not send every thread back at the same instant.
+///
+/// A run has dozens of requests in flight, so a 429 arrives at all of them at once and a
+/// fixed delay marches them back into the API in lockstep — the same burst that caused
+/// the limit. The wait is only ever lengthened, so a `Retry-After` is still honoured.
+fn scattered(delay: Duration) -> Duration {
+    // Enough spread to break a tie between threads, which is all this needs. A counter
+    // rather than a clock, because two threads that were rate limited together can read
+    // the clock in the same nanosecond but never take the same ticket.
+    static TICKET: AtomicU64 = AtomicU64::new(0);
+    let mut seed = TICKET
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        | 1;
+    seed ^= seed << 13;
+    seed ^= seed >> 7;
+    seed ^= seed << 17;
+    let spread = u64::try_from(JITTER_SPREAD.as_nanos()).unwrap_or(u64::MAX);
+    delay + Duration::from_nanos(seed % spread.max(1))
 }
 
 fn summarise_error_body(body: &str) -> String {
@@ -861,6 +891,20 @@ mod tests {
     }
 
     #[test]
+    fn only_a_body_that_parses_is_worth_caching() {
+        // The guard `fetch` puts in front of the cache. A 200 carrying an HTML error page
+        // or a truncated payload would otherwise be served from disk until the TTL ran
+        // out, so every retry failed identically and --no-cache was the only way out.
+        let cacheable = |body: &str| serde_json::from_str::<serde::de::IgnoredAny>(body).is_ok();
+
+        assert!(cacheable(r#"{"total": 1, "listings": []}"#));
+        assert!(!cacheable("<html><body>502 Bad Gateway</body></html>"));
+        // Truncated mid-object, which is what a dropped connection leaves behind.
+        assert!(!cacheable(r#"{"total": 1, "listings": [{"id":"#));
+        assert!(!cacheable(""));
+    }
+
+    #[test]
     fn catalogue_whitespace_never_reaches_a_table() {
         // Reverb really does ship names like this; a tab would shift every column after
         // it, and a newline would break the row in two.
@@ -944,6 +988,29 @@ mod tests {
         );
         // A server asking for an unreasonable wait is capped rather than obeyed.
         assert_eq!(RETRY_MAX_DELAY, backoff(1, Some(Duration::from_secs(600))));
+    }
+
+    #[test]
+    fn a_scattered_wait_never_undercuts_the_delay_it_was_given() {
+        let delay = Duration::from_millis(800);
+        let waits: Vec<Duration> = (0..64).map(|_| scattered(delay)).collect();
+        for wait in &waits {
+            assert!(
+                *wait >= delay,
+                "scattering cut the wait short at {wait:?}, so a Retry-After would be ignored"
+            );
+            assert!(
+                *wait < delay + JITTER_SPREAD,
+                "scattering stretched the wait to {wait:?}, well past what it is allowed"
+            );
+        }
+        // The point of the exercise: threads rate limited together do not all come back
+        // at the same instant.
+        let first = waits[0];
+        assert!(
+            waits.iter().any(|wait| *wait != first),
+            "every scattered wait was identical, which is the herd this exists to break"
+        );
     }
 
     #[test]
