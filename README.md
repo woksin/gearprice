@@ -8,7 +8,8 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#platforms)
 [![CI](https://github.com/woksin/gearprice/actions/workflows/ci.yml/badge.svg)](https://github.com/woksin/gearprice/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/woksin/gearprice?color=86efac)](https://github.com/woksin/gearprice/releases/latest)
-[![License](https://img.shields.io/badge/license-MIT-green)](#license)
+[![Homebrew](https://img.shields.io/badge/homebrew-woksin%2Fgearprice-fbb040?logo=homebrew&logoColor=white)](https://github.com/woksin/homebrew-gearprice)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **What guitar gear costs on Reverb right now — and what class of gear it actually is.**
 
@@ -184,6 +185,14 @@ gearprice update
 
 Downloads the release for your platform and checks it against the published `SHA256SUMS`
 before replacing the running binary. `gearprice update --check` just looks.
+
+## Quick start
+
+```bash
+gearprice deal https://reverb.com/item/95521465-1969-marshall-major-200-watt-amp   # is this listing worth it?
+gearprice price "Gibson Les Paul Standard 60s" --asking 1900                       # what one model costs
+gearprice guide                                                                   # four commands and one caveat
+```
 
 ## Commands
 
@@ -606,9 +615,14 @@ what is held and `gearprice cache --clear` empties it.
 macOS (Apple Silicon and Intel), Linux (x86-64 and arm64), Windows (x86-64 and x86).
 Rust 1.88 or newer to build from source.
 
+## Related projects
+
+- [homebrew-gearprice](https://github.com/woksin/homebrew-gearprice) — the Homebrew tap that installs gearprice.
+- [reap](https://github.com/woksin/reap) and [workstats](https://github.com/woksin/workstats) — other Rust CLIs by the same author.
+
 ## License
 
-MIT. See [LICENSE](LICENSE).
+[MIT](LICENSE) © 2026 woksin
 
 gearprice is not affiliated with, endorsed by, or connected to Reverb.com. It reads their
 public API as any visitor would.
